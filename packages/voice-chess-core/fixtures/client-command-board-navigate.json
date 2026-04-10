@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.0.0",
+  "direction": "command",
+  "type": "board.navigate",
+  "messageId": "msg_cmd_nav_001",
+  "sessionId": "session_demo_001",
+  "timestamp": "2026-04-10T12:00:02Z",
+  "payload": {
+    "mode": "review",
+    "ply": 8
+  }
+}

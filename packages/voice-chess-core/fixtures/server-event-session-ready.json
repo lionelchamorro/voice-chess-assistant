@@ -1,0 +1,17 @@
+{
+  "protocolVersion": "1.0.0",
+  "direction": "event",
+  "type": "session.ready",
+  "messageId": "msg_evt_ready_001",
+  "sessionId": "session_demo_001",
+  "timestamp": "2026-04-10T12:00:01Z",
+  "payload": {
+    "transport": "smallwebrtc",
+    "capabilities": {
+      "manualMoves": true,
+      "pgnNavigation": true,
+      "boardAnnotations": true,
+      "boardHighlights": true
+    }
+  }
+}

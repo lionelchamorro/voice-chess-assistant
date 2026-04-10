@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voice-chess-example-server"
+version = "0.1.0"
+description = "Example server app for the voice chess assistant."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "voice-chess-server",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_chess_example_server"]
+
+[tool.uv.sources]
+voice-chess-server = { path = "../../packages/voice-chess-server", editable = true }

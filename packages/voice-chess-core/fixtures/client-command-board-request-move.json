@@ -1,0 +1,16 @@
+{
+  "protocolVersion": "1.0.0",
+  "direction": "command",
+  "type": "board.request_move",
+  "messageId": "msg_cmd_move_001",
+  "sessionId": "session_demo_001",
+  "timestamp": "2026-04-10T12:00:00Z",
+  "payload": {
+    "source": "user",
+    "move": {
+      "from": "e2",
+      "to": "e4",
+      "promotion": null
+    }
+  }
+}

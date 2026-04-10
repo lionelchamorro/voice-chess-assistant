@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voice-chess-testkit"
+version = "0.1.0"
+description = "Testing helpers for the voice chess assistant backend."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["voice-chess-server"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_chess_testkit"]
+
+[tool.uv.sources]
+voice-chess-server = { workspace = true }

@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-chess.dev/schemas/client-command.schema.json",
+  "title": "Voice Chess Client Command",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/BoardRequestMoveCommand" },
+    { "$ref": "#/$defs/BoardNavigateCommand" },
+    { "$ref": "#/$defs/BoardRequestResetCommand" },
+    { "$ref": "#/$defs/BoardRequestLoadFenCommand" },
+    { "$ref": "#/$defs/BoardRequestLoadPgnCommand" }
+  ],
+  "$defs": {
+    "EnvelopeBase": {
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "direction",
+        "type",
+        "messageId",
+        "sessionId",
+        "timestamp",
+        "payload"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "1.0.0"
+        },
+        "direction": {
+          "const": "command"
+        },
+        "messageId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PromotionPiece": {
+      "type": "string",
+      "enum": ["queen", "rook", "bishop", "knight"]
+    },
+    "CommandSource": {
+      "type": "string",
+      "enum": ["user", "agent", "system"]
+    },
+    "BoardViewMode": {
+      "type": "string",
+      "enum": ["live", "review"]
+    },
+    "BoardRequestMoveCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.request_move" },
+            "payload": {
+              "type": "object",
+              "required": ["source", "move"],
+              "properties": {
+                "source": { "$ref": "#/$defs/CommandSource" },
+                "move": {
+                  "type": "object",
+                  "required": ["from", "to"],
+                  "properties": {
+                    "from": { "type": "string", "minLength": 2, "maxLength": 2 },
+                    "to": { "type": "string", "minLength": 2, "maxLength": 2 },
+                    "promotion": {
+                      "oneOf": [
+                        { "$ref": "#/$defs/PromotionPiece" },
+                        { "type": "null" }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardNavigateCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.navigate" },
+            "payload": {
+              "type": "object",
+              "required": ["mode"],
+              "properties": {
+                "mode": { "$ref": "#/$defs/BoardViewMode" },
+                "ply": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardRequestResetCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.request_reset" },
+            "payload": {
+              "type": "object",
+              "required": ["source"],
+              "properties": {
+                "source": { "$ref": "#/$defs/CommandSource" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardRequestLoadFenCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.request_load_fen" },
+            "payload": {
+              "type": "object",
+              "required": ["source", "fen"],
+              "properties": {
+                "source": { "$ref": "#/$defs/CommandSource" },
+                "fen": { "type": "string", "minLength": 1 }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardRequestLoadPgnCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.request_load_pgn" },
+            "payload": {
+              "type": "object",
+              "required": ["source", "pgn"],
+              "properties": {
+                "source": { "$ref": "#/$defs/CommandSource" },
+                "pgn": { "type": "string", "minLength": 1 },
+                "startPly": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

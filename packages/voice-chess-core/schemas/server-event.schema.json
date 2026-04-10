@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-chess.dev/schemas/server-event.schema.json",
+  "title": "Voice Chess Server Event",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/SessionReadyEvent" },
+    { "$ref": "#/$defs/SessionErrorEvent" },
+    { "$ref": "#/$defs/BoardStateEvent" },
+    { "$ref": "#/$defs/MoveAppliedEvent" },
+    { "$ref": "#/$defs/AnnotationSetEvent" },
+    { "$ref": "#/$defs/HighlightSetEvent" },
+    { "$ref": "#/$defs/BoardResetEvent" }
+  ],
+  "$defs": {
+    "EnvelopeBase": {
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "direction",
+        "type",
+        "messageId",
+        "sessionId",
+        "timestamp",
+        "payload"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "1.0.0"
+        },
+        "direction": {
+          "const": "event"
+        },
+        "messageId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Color": {
+      "type": "string",
+      "enum": ["white", "black"]
+    },
+    "BoardViewMode": {
+      "type": "string",
+      "enum": ["live", "review"]
+    },
+    "EventOrigin": {
+      "type": "string",
+      "enum": ["session-init", "server-sync", "user-command", "agent-tool"]
+    },
+    "PromotionPiece": {
+      "type": "string",
+      "enum": ["queen", "rook", "bishop", "knight"]
+    },
+    "MoveDescriptor": {
+      "type": "object",
+      "required": [
+        "ply",
+        "san",
+        "uci",
+        "from",
+        "to",
+        "fenAfter",
+        "color",
+        "piece"
+      ],
+      "properties": {
+        "ply": { "type": "integer", "minimum": 1 },
+        "san": { "type": "string", "minLength": 1 },
+        "uci": { "type": "string", "minLength": 4 },
+        "from": { "type": "string", "minLength": 2, "maxLength": 2 },
+        "to": { "type": "string", "minLength": 2, "maxLength": 2 },
+        "fenAfter": { "type": "string", "minLength": 1 },
+        "color": { "$ref": "#/$defs/Color" },
+        "piece": { "type": "string", "minLength": 1 },
+        "capturedPiece": { "type": ["string", "null"] },
+        "promotion": {
+          "oneOf": [
+            { "$ref": "#/$defs/PromotionPiece" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "BoardAnnotation": {
+      "type": "object",
+      "required": ["id", "kind", "color"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["comment", "arrow", "circle"] },
+        "color": { "type": "string", "enum": ["green", "yellow", "red", "blue"] },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "square": { "type": "string" },
+        "text": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "BoardHighlight": {
+      "type": "object",
+      "required": ["id", "squares", "color"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "squares": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 2, "maxLength": 2 }
+        },
+        "color": { "type": "string", "enum": ["green", "yellow", "red", "blue"] },
+        "label": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "LegalMovesMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 2, "maxLength": 2 }
+      }
+    },
+    "BoardState": {
+      "type": "object",
+      "required": [
+        "fen",
+        "orientation",
+        "turn",
+        "viewMode",
+        "legalMoves",
+        "moveHistory",
+        "annotations",
+        "highlights",
+        "isCheck",
+        "isCheckmate",
+        "isStalemate",
+        "isDraw"
+      ],
+      "properties": {
+        "fen": { "type": "string", "minLength": 1 },
+        "pgn": { "type": ["string", "null"] },
+        "orientation": { "$ref": "#/$defs/Color" },
+        "turn": { "$ref": "#/$defs/Color" },
+        "viewMode": { "$ref": "#/$defs/BoardViewMode" },
+        "reviewPly": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "legalMoves": { "$ref": "#/$defs/LegalMovesMap" },
+        "moveHistory": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/MoveDescriptor" }
+        },
+        "lastMove": {
+          "oneOf": [
+            { "$ref": "#/$defs/MoveDescriptor" },
+            { "type": "null" }
+          ]
+        },
+        "annotations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/BoardAnnotation" }
+        },
+        "highlights": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/BoardHighlight" }
+        },
+        "isCheck": { "type": "boolean" },
+        "isCheckmate": { "type": "boolean" },
+        "isStalemate": { "type": "boolean" },
+        "isDraw": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "SessionReadyEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "session.ready" },
+            "payload": {
+              "type": "object",
+              "required": ["transport", "capabilities"],
+              "properties": {
+                "transport": { "const": "smallwebrtc" },
+                "capabilities": {
+                  "type": "object",
+                  "required": [
+                    "manualMoves",
+                    "pgnNavigation",
+                    "boardAnnotations",
+                    "boardHighlights"
+                  ],
+                  "properties": {
+                    "manualMoves": { "const": true },
+                    "pgnNavigation": { "const": true },
+                    "boardAnnotations": { "const": true },
+                    "boardHighlights": { "const": true }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "SessionErrorEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "session.error" },
+            "payload": {
+              "type": "object",
+              "required": ["code", "message", "recoverable"],
+              "properties": {
+                "code": { "type": "string", "minLength": 1 },
+                "message": { "type": "string", "minLength": 1 },
+                "recoverable": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardStateEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.state" },
+            "payload": {
+              "type": "object",
+              "required": ["origin", "board"],
+              "properties": {
+                "origin": { "$ref": "#/$defs/EventOrigin" },
+                "board": { "$ref": "#/$defs/BoardState" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "MoveAppliedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.move_applied" },
+            "payload": {
+              "type": "object",
+              "required": ["origin", "move", "board"],
+              "properties": {
+                "origin": { "$ref": "#/$defs/EventOrigin" },
+                "move": { "$ref": "#/$defs/MoveDescriptor" },
+                "board": { "$ref": "#/$defs/BoardState" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "AnnotationSetEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.annotation_set" },
+            "payload": {
+              "type": "object",
+              "required": ["annotations"],
+              "properties": {
+                "annotations": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/BoardAnnotation" }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "HighlightSetEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.highlight_set" },
+            "payload": {
+              "type": "object",
+              "required": ["highlights"],
+              "properties": {
+                "highlights": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/BoardHighlight" }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "BoardResetEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeBase" },
+        {
+          "properties": {
+            "type": { "const": "board.reset" },
+            "payload": {
+              "type": "object",
+              "required": ["origin", "board"],
+              "properties": {
+                "origin": { "$ref": "#/$defs/EventOrigin" },
+                "board": { "$ref": "#/$defs/BoardState" }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

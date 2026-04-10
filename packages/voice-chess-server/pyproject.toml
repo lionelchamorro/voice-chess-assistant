@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voice-chess-server"
+version = "0.1.0"
+description = "Reusable backend library for a voice-enabled chess assistant."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.1",
+    "python-chess>=1.999",
+    "structlog>=24.4.0",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+voice = [
+    "pipecat-ai[webrtc,openai,deepgram,elevenlabs,cartesia,silero,local-smart-turn-v3]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "pytest-timeout>=2.4.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["voice_chess_server"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

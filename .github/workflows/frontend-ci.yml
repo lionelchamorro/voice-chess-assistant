@@ -1,0 +1,51 @@
+name: Frontend CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "packages/voice-chess-core/**"
+      - "packages/voice-chess-react/**"
+      - "examples/web/**"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - ".github/workflows/frontend-ci.yml"
+
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck core
+        run: pnpm --filter @voice-chess/core typecheck
+
+      - name: Typecheck react package
+        run: pnpm --filter @voice-chess/react typecheck
+
+      - name: Run react package tests
+        run: pnpm --filter @voice-chess/react test
+
+      - name: Typecheck example web
+        run: pnpm --filter @voice-chess/example-web typecheck
