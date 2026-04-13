@@ -74,6 +74,6 @@ describe("buildSquareState", () => {
     const squares = buildSquareState(SAMPLE_BOARD_STATE, "e7");
     const e5 = squares.find((square) => square.square === "e5");
     expect(e5?.isLegalTarget).toBe(true);
-    expect(resolveSquareBackground(e5!)).toBe("#bbf7d0");
+    expect(resolveSquareBackground(e5!)).toContain("#84cc16");
   });
 });

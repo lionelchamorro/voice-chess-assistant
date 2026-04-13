@@ -4,6 +4,9 @@ export type BoardViewMode = "live" | "review";
 export type CommandSource = "user" | "agent" | "system";
 export type EventOrigin = "session-init" | "server-sync" | "user-command" | "agent-tool";
 export type PromotionPiece = "queen" | "rook" | "bishop" | "knight";
+export type ConversationState = "idle" | "listening" | "thinking" | "speaking";
+export type ConversationMessageRole = "user" | "assistant" | "system";
+export type ToolCallStatus = "started" | "completed";
 
 export type LegalMovesMap = Record<string, string[]>;
 
@@ -49,6 +52,22 @@ export interface BoardHighlight {
   squares: string[];
   color: "green" | "yellow" | "red" | "blue";
   label?: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: ConversationMessageRole;
+  content: string;
+  createdAt: string;
+}
+
+export interface ToolCallTrace {
+  id: string;
+  toolName: string;
+  status: ToolCallStatus;
+  summary: string;
+  arguments?: Record<string, unknown> | null;
+  createdAt: string;
 }
 
 export interface BoardState {
@@ -137,6 +156,30 @@ export type BoardResetEvent = VoiceChessEnvelope<
   "event"
 >;
 
+export type VoiceStateEvent = VoiceChessEnvelope<
+  "voice.state",
+  {
+    state: ConversationState;
+  },
+  "event"
+>;
+
+export type ConversationMessageEvent = VoiceChessEnvelope<
+  "conversation.message",
+  {
+    message: ConversationMessage;
+  },
+  "event"
+>;
+
+export type ToolCallEvent = VoiceChessEnvelope<
+  "tool.call",
+  {
+    toolCall: ToolCallTrace;
+  },
+  "event"
+>;
+
 export type VoiceChessServerEvent =
   | SessionReadyEvent
   | SessionErrorEvent
@@ -144,7 +187,10 @@ export type VoiceChessServerEvent =
   | MoveAppliedEvent
   | AnnotationSetEvent
   | HighlightSetEvent
-  | BoardResetEvent;
+  | BoardResetEvent
+  | VoiceStateEvent
+  | ConversationMessageEvent
+  | ToolCallEvent;
 
 export type BoardRequestMoveCommand = VoiceChessEnvelope<
   "board.request_move",
@@ -195,9 +241,19 @@ export type BoardRequestLoadPgnCommand = VoiceChessEnvelope<
   "command"
 >;
 
+export type ConversationRequestDemoCommand = VoiceChessEnvelope<
+  "conversation.request_demo",
+  {
+    source: CommandSource;
+    prompt: string;
+  },
+  "command"
+>;
+
 export type VoiceChessClientCommand =
   | BoardRequestMoveCommand
   | BoardNavigateCommand
   | BoardRequestResetCommand
   | BoardRequestLoadFenCommand
-  | BoardRequestLoadPgnCommand;
+  | BoardRequestLoadPgnCommand
+  | ConversationRequestDemoCommand;

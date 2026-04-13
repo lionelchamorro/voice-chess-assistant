@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 import structlog
 
 from voice_chess_server.api.dependencies import get_bot_orchestrator, get_signaling_service
-from voice_chess_server.schemas.signaling import OfferRequest, OfferResponse
+from voice_chess_server.schemas.signaling import OfferRequest, OfferResponse, VoiceStatusResponse
 from voice_chess_server.services.orchestrator import BotOrchestrator
 from voice_chess_server.services.signaling import (
     SignalingRuntimeError,
@@ -34,3 +34,21 @@ async def create_offer(
         background_tasks.add_task(bot_orchestrator.run_transport, request.session_id, transport)
 
     return answer
+
+
+@router.get("/api/voice-status", response_model=VoiceStatusResponse)
+async def voice_status(
+    signaling_service: SmallWebRTCSignalingService = Depends(get_signaling_service),
+    bot_orchestrator: BotOrchestrator = Depends(get_bot_orchestrator),
+) -> VoiceStatusResponse:
+    """Return whether voice transport is usable in the current server runtime."""
+
+    signaling_available, signaling_reason = signaling_service.get_runtime_status()
+    if not signaling_available:
+        return VoiceStatusResponse(available=False, reason=signaling_reason)
+
+    orchestrator_available, orchestrator_reason = bot_orchestrator.get_runtime_status()
+    if not orchestrator_available:
+        return VoiceStatusResponse(available=False, reason=orchestrator_reason)
+
+    return VoiceStatusResponse(available=True, reason=None)

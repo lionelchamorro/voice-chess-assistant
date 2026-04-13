@@ -1,4 +1,11 @@
-import type { BoardState, VoiceChessClientCommand, VoiceChessServerEvent } from "@voice-chess/core";
+import type {
+  BoardState,
+  ConversationMessage,
+  ConversationState,
+  ToolCallTrace,
+  VoiceChessClientCommand,
+  VoiceChessServerEvent,
+} from "@voice-chess/core";
 import type { Dispatch, SetStateAction } from "react";
 import {
   createContext,
@@ -8,6 +15,7 @@ import {
 } from "react";
 
 import { useBoardSocket } from "../hooks/useBoardSocket";
+import { useVoiceTransport } from "../hooks/useVoiceTransport";
 import type { MoveIntent, VoiceChessProviderProps, VoiceChessSessionValue } from "../types";
 
 export const VoiceChessContext = createContext<VoiceChessSessionValue | null>(null);
@@ -30,13 +38,18 @@ function buildCommandEnvelope<TPayload>(
 
 export function VoiceChessProvider({
   boardSocketUrl,
+  signalingApiUrl,
   sessionId,
   autoConnect = true,
   children,
 }: VoiceChessProviderProps) {
   const [boardState, setBoardState] = useState<BoardState | null>(null);
+  const [conversationState, setConversationState] = useState<ConversationState>("idle");
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
+  const [toolCalls, setToolCalls] = useState<ToolCallTrace[]>([]);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [voiceErrorMessage, setVoiceErrorMessage] = useState<string | null>(null);
 
   const {
     connectionStatus,
@@ -48,12 +61,32 @@ export function VoiceChessProvider({
     sessionId,
     onEvent(event) {
       startTransition(() => {
-        applyServerEvent(event, setBoardState, setErrorMessage, setSelectedSquare);
+        applyServerEvent(event, {
+          setBoardState,
+          setConversationState,
+          setConversationMessages,
+          setToolCalls,
+          setErrorMessage,
+          setSelectedSquare,
+        });
       });
     },
     onError(message) {
       setErrorMessage(message);
     },
+  });
+  const {
+    voiceConnectionStatus,
+    voiceTransportAvailable,
+    voiceTransportReason,
+    microphonePermissionStatus,
+    remoteAudioStream,
+    connectVoice: connectVoiceTransport,
+    disconnectVoice,
+  } = useVoiceTransport({
+    signalingApiUrl: signalingApiUrl ?? null,
+    sessionId,
+    onError: setVoiceErrorMessage,
   });
 
   useEffect(() => {
@@ -64,14 +97,33 @@ export function VoiceChessProvider({
     return disconnect;
   }, [autoConnect, connect, disconnect]);
 
+  async function connectVoice() {
+    if (connectionStatus !== "connected") {
+      await connect();
+    }
+    await connectVoiceTransport();
+  }
+
   const value: VoiceChessSessionValue = {
     sessionId,
     boardState,
+    conversationState,
+    conversationMessages,
+    toolCalls,
     connectionStatus,
+    voiceConnectionStatus,
+    voiceTransportAvailable,
+    voiceTransportReason,
     errorMessage,
+    voiceErrorMessage,
+    microphonePermissionStatus,
+    signalingApiUrl: signalingApiUrl ?? null,
+    remoteAudioStream,
     selectedSquare,
     connect,
     disconnect,
+    connectVoice,
+    disconnectVoice,
     selectSquare: setSelectedSquare,
     sendCommand,
     requestMove(move: MoveIntent) {
@@ -107,6 +159,14 @@ export function VoiceChessProvider({
         }),
       );
     },
+    requestDemoPrompt(prompt: string) {
+      sendCommand(
+        buildCommandEnvelope(sessionId, "conversation.request_demo", {
+          source: "user",
+          prompt,
+        }),
+      );
+    },
     resetBoard() {
       sendCommand(
         buildCommandEnvelope(sessionId, "board.request_reset", {
@@ -121,10 +181,24 @@ export function VoiceChessProvider({
 
 function applyServerEvent(
   event: VoiceChessServerEvent,
-  setBoardState: Dispatch<SetStateAction<BoardState | null>>,
-  setErrorMessage: (value: string | null) => void,
-  setSelectedSquare: (value: string | null) => void,
+  handlers: {
+    setBoardState: Dispatch<SetStateAction<BoardState | null>>;
+    setConversationState: Dispatch<SetStateAction<ConversationState>>;
+    setConversationMessages: Dispatch<SetStateAction<ConversationMessage[]>>;
+    setToolCalls: Dispatch<SetStateAction<ToolCallTrace[]>>;
+    setErrorMessage: (value: string | null) => void;
+    setSelectedSquare: (value: string | null) => void;
+  },
 ) {
+  const {
+    setBoardState,
+    setConversationState,
+    setConversationMessages,
+    setToolCalls,
+    setErrorMessage,
+    setSelectedSquare,
+  } = handlers;
+
   switch (event.type) {
     case "session.ready":
       setErrorMessage(null);
@@ -160,6 +234,15 @@ function applyServerEvent(
             }
           : current,
       );
+      return;
+    case "voice.state":
+      setConversationState(event.payload.state);
+      return;
+    case "conversation.message":
+      setConversationMessages((current) => [...current, event.payload.message]);
+      return;
+    case "tool.call":
+      setToolCalls((current) => [...current, event.payload.toolCall]);
       return;
     default:
       return;

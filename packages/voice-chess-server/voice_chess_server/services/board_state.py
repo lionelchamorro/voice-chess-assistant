@@ -141,6 +141,24 @@ class BoardSessionState:
             self.navigate("review", start_ply)
         return self.snapshot()
 
+    def undo_move(self) -> tuple[MoveDescriptor, BoardState]:
+        """Undo the latest live move."""
+
+        if self.view_mode != "live":
+            raise BoardCommandError(
+                "review_mode_locked",
+                "Cannot undo a move while the board is in review mode.",
+            )
+
+        if not self.move_stack:
+            raise BoardCommandError("no_moves_to_undo", "There is no move to undo.")
+
+        history = self._move_history()
+        last_move = history[-1]
+        self.move_stack.pop()
+        self.review_ply = None
+        return last_move, self.snapshot()
+
     def set_annotations(self, annotations: list[BoardAnnotation]) -> BoardState:
         """Replace board annotations."""
 
@@ -151,6 +169,12 @@ class BoardSessionState:
         """Replace board highlights."""
 
         self.highlights = highlights
+        return self.snapshot()
+
+    def clear_highlights(self) -> BoardState:
+        """Clear all highlights."""
+
+        self.highlights = []
         return self.snapshot()
 
     def navigate(self, mode: BoardViewMode, ply: int | None) -> BoardState:
@@ -205,7 +229,9 @@ class BoardSessionState:
 
     def _view_board(self) -> chess.Board:
         board = self._base_board()
-        moves = self.move_stack if self.view_mode == "live" else self.move_stack[: self.review_ply or 0]
+        moves = (
+            self.move_stack if self.view_mode == "live" else self.move_stack[: self.review_ply or 0]
+        )
         for move in moves:
             board.push(move)
         return board

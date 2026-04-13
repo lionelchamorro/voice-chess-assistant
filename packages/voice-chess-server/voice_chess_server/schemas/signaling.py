@@ -24,3 +24,12 @@ class OfferResponse(BaseModel):
     sdp: str = Field(min_length=1)
     type: str = Field(min_length=1)
     pc_id: str = Field(alias="pcId", min_length=1)
+
+
+class VoiceStatusResponse(BaseModel):
+    """Voice transport availability response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    reason: str | None = None

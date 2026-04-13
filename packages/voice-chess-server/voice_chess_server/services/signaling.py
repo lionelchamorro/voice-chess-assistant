@@ -94,6 +94,15 @@ class SmallWebRTCSignalingService:
             await connection.disconnect()
         self._peer_connections.clear()
 
+    def get_runtime_status(self) -> tuple[bool, str | None]:
+        """Return whether the SmallWebRTC runtime is importable."""
+
+        try:
+            self._load_runtime()
+        except SignalingRuntimeError as exc:
+            return False, str(exc)
+        return True, None
+
     def _load_runtime(self) -> tuple[Any, Any, Any, Any]:
         try:
             from pipecat.transports.base_transport import TransportParams

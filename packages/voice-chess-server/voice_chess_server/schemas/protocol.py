@@ -13,6 +13,9 @@ BoardViewMode = Literal["live", "review"]
 CommandSource = Literal["user", "agent", "system"]
 EventOrigin = Literal["session-init", "server-sync", "user-command", "agent-tool"]
 PromotionPiece = Literal["queen", "rook", "bishop", "knight"]
+ConversationState = Literal["idle", "listening", "thinking", "speaking"]
+ConversationMessageRole = Literal["user", "assistant", "system"]
+ToolCallStatus = Literal["started", "completed"]
 
 
 class EnvelopeBase(BaseModel):
@@ -118,12 +121,29 @@ class BoardRequestLoadPgnCommand(CommandEnvelopeBase):
     payload: LoadPgnPayload
 
 
+class ConversationRequestDemoPayload(BaseModel):
+    """Demo conversation request payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: CommandSource
+    prompt: str = Field(min_length=1)
+
+
+class ConversationRequestDemoCommand(CommandEnvelopeBase):
+    """Client request to simulate a voice turn for demo and tests."""
+
+    type: Literal["conversation.request_demo"] = "conversation.request_demo"
+    payload: ConversationRequestDemoPayload
+
+
 VoiceChessClientCommand = Annotated[
     BoardRequestMoveCommand
     | BoardNavigateCommand
     | BoardRequestResetCommand
     | BoardRequestLoadFenCommand
-    | BoardRequestLoadPgnCommand,
+    | BoardRequestLoadPgnCommand
+    | ConversationRequestDemoCommand,
     Field(discriminator="type"),
 ]
 
@@ -190,6 +210,30 @@ class BoardState(BaseModel):
     is_checkmate: bool = Field(alias="isCheckmate")
     is_stalemate: bool = Field(alias="isStalemate")
     is_draw: bool = Field(alias="isDraw")
+
+
+class ConversationMessage(BaseModel):
+    """Conversation message payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    role: ConversationMessageRole
+    content: str
+    created_at: str = Field(alias="createdAt")
+
+
+class ToolCallTrace(BaseModel):
+    """Trace event for a tool invoked by the assistant."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tool_name: str = Field(alias="toolName")
+    status: ToolCallStatus
+    summary: str
+    arguments: dict[str, object] | None = None
+    created_at: str = Field(alias="createdAt")
 
 
 class SessionReadyPayload(BaseModel):
@@ -302,3 +346,48 @@ class BoardResetEvent(EventEnvelopeBase):
 
     type: Literal["board.reset"] = "board.reset"
     payload: BoardResetPayload
+
+
+class VoiceStatePayload(BaseModel):
+    """Conversation state payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: ConversationState
+
+
+class VoiceStateEvent(EventEnvelopeBase):
+    """Conversation state event."""
+
+    type: Literal["voice.state"] = "voice.state"
+    payload: VoiceStatePayload
+
+
+class ConversationMessagePayload(BaseModel):
+    """Conversation message event payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: ConversationMessage
+
+
+class ConversationMessageEvent(EventEnvelopeBase):
+    """Conversation message event."""
+
+    type: Literal["conversation.message"] = "conversation.message"
+    payload: ConversationMessagePayload
+
+
+class ToolCallPayload(BaseModel):
+    """Assistant tool call event payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call: ToolCallTrace = Field(alias="toolCall")
+
+
+class ToolCallEvent(EventEnvelopeBase):
+    """Assistant tool call event."""
+
+    type: Literal["tool.call"] = "tool.call"
+    payload: ToolCallPayload

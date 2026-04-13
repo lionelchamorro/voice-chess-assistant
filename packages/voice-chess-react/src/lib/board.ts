@@ -56,25 +56,25 @@ export function buildSquareState(boardState: BoardState, selectedSquare: string 
 
 export function resolveSquareBackground(square: BoardSquareState): string {
   if (square.isSelected) {
-    return "#fde68a";
+    return "linear-gradient(180deg, #f7d774 0%, #e5b83d 100%)";
   }
   if (square.isLegalTarget) {
-    return "#bbf7d0";
+    return "linear-gradient(180deg, #c7f3b3 0%, #84cc16 100%)";
   }
   if (square.highlightColor === "green") {
-    return "#bbf7d0";
+    return "linear-gradient(180deg, #bbf7d0 0%, #4ade80 100%)";
   }
   if (square.highlightColor === "yellow") {
-    return "#fde68a";
+    return "linear-gradient(180deg, #fde68a 0%, #f59e0b 100%)";
   }
   if (square.highlightColor === "red") {
-    return "#fecaca";
+    return "linear-gradient(180deg, #fecaca 0%, #ef4444 100%)";
   }
   if (square.highlightColor === "blue") {
-    return "#bfdbfe";
+    return "linear-gradient(180deg, #bfdbfe 0%, #3b82f6 100%)";
   }
   if (square.isLastMove) {
-    return "#e9d5ff";
+    return "linear-gradient(180deg, #e9d5ff 0%, #c084fc 100%)";
   }
-  return square.isLight ? "#f8fafc" : "#dbe4f0";
+  return square.isLight ? "#f2dfc2" : "#b07a4f";
 }

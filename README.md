@@ -6,7 +6,7 @@ can speak, reason about a game, and control the board over WebSocket.
 ## What is included
 
 - `@voice-chess/core`: protocol types, JSON schemas and fixtures
-- `@voice-chess/react`: provider, hooks, controlled board UI and status widgets
+- `@voice-chess/react`: provider, hooks, controlled board UI, browser voice transport and status widgets
 - `voice-chess-server`: reusable FastAPI + Pipecat backend package
 - `examples/server`: runnable backend wrapper
 - `examples/web`: runnable Vite app
@@ -37,7 +37,7 @@ uv sync --project packages/voice-chess-server --extra voice --group dev
 uv sync --project examples/server
 ```
 
-2. Create the example server env file from [examples/server/.env.example](/Users/lionelchamorro/Projects/personal/voice-chess-assisstant/examples/server/.env.example):
+2. Create the example server env file from [.env.example](.//Users/lionelchamorro/Projects/personal/voice-chess-assisstant/examples/server/.env.example):
 
 ```bash
 cp examples/server/.env.example examples/server/.env
@@ -69,19 +69,26 @@ uv run --project examples/server uvicorn voice_chess_example_server.main:app --h
 pnpm --filter @voice-chess/example-web dev
 ```
 
-The web app expects the board socket at `ws://localhost:7860/ws/sessions` by
-default and the backend exposes health at `http://localhost:7860/health`.
+6. Open the web app, click `Connect` for the board session, then click `Start voice`.
+   The browser should request microphone permission and the remote assistant audio
+   will play back in the embedded audio control.
+
+The web app expects the board socket at `ws://localhost:7860/ws/sessions` and
+the signaling API at `http://localhost:7860` by default. The backend also
+exposes health at `http://localhost:7860/health`.
 
 ## How to extend the library
 
 ### Frontend
 
-Compose your own UI around `VoiceChessProvider` and the headless hooks:
+Compose your own UI around `VoiceChessProvider`, the board primitives, and the
+voice transport controls:
 
 ```tsx
 import {
   VoiceChessBoard,
   VoiceChessProvider,
+  VoiceChessVoiceControls,
   useVoiceChessSession,
 } from "@voice-chess/react";
 
@@ -99,10 +106,12 @@ export function App() {
   return (
     <VoiceChessProvider
       boardSocketUrl="ws://localhost:7860/ws/sessions"
+      signalingApiUrl="http://localhost:7860"
       sessionId="analysis-session"
       autoConnect={false}
     >
       <Toolbar />
+      <VoiceChessVoiceControls />
       <VoiceChessBoard />
     </VoiceChessProvider>
   );
@@ -145,6 +154,7 @@ The main extension seams today are:
 - `Settings` for provider and runtime configuration
 - `BotOrchestrator` for LLM/STT/TTS wiring and tool registration
 - `SessionManager` for canonical board state and domain events
+- `VoiceChessProvider` for browser signaling and unified board + voice session state
 - `@voice-chess/core` for the cross-platform protocol contract
 
 ## Documentation

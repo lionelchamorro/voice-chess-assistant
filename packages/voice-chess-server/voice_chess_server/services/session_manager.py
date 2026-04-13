@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import UTC, datetime
+import re
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
@@ -23,6 +24,11 @@ from voice_chess_server.schemas.protocol import (
     BoardResetEvent,
     BoardStateEvent,
     BoardStatePayload,
+    ConversationMessage,
+    ConversationMessageEvent,
+    ConversationMessagePayload,
+    ConversationRequestDemoCommand,
+    ConversationState,
     EventOrigin,
     HighlightSetEvent,
     HighlightSetPayload,
@@ -30,6 +36,11 @@ from voice_chess_server.schemas.protocol import (
     SessionErrorPayload,
     SessionReadyEvent,
     SessionReadyPayload,
+    ToolCallEvent,
+    ToolCallPayload,
+    ToolCallTrace,
+    VoiceStateEvent,
+    VoiceStatePayload,
     VoiceChessClientCommand,
 )
 from voice_chess_server.services.board_state import BoardCommandError, BoardSessionState
@@ -37,6 +48,8 @@ from voice_chess_server.services.board_state import BoardCommandError, BoardSess
 log = structlog.get_logger()
 
 COMMAND_ADAPTER = TypeAdapter(VoiceChessClientCommand)
+MOVE_PROMPT_PATTERN = re.compile(r"\b([a-h][1-8])\s*(?:to|-)\s*([a-h][1-8])\b", re.IGNORECASE)
+SQUARE_PATTERN = re.compile(r"[a-h][1-8]", re.IGNORECASE)
 
 
 class SessionManager:
@@ -45,6 +58,9 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, BoardSessionState] = {}
         self._clients: dict[str, set[WebSocket]] = defaultdict(set)
+        self._conversation_state: dict[str, ConversationState] = {}
+        self._conversation_messages: dict[str, list[ConversationMessage]] = defaultdict(list)
+        self._tool_calls: dict[str, list[ToolCallTrace]] = defaultdict(list)
         self._lock = asyncio.Lock()
 
     async def connect(self, session_id: str, websocket: WebSocket) -> None:
@@ -54,15 +70,38 @@ class SessionManager:
         async with self._lock:
             self._clients[session_id].add(websocket)
             state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+            conversation_state = self._conversation_state.setdefault(session_id, "idle")
 
         try:
-            await websocket.send_json(self._ready_event(session_id).model_dump(by_alias=True, mode="json"))
+            await websocket.send_json(
+                self._ready_event(session_id).model_dump(by_alias=True, mode="json")
+            )
             await websocket.send_json(
                 self._state_event(session_id, state.snapshot(), origin="session-init").model_dump(
                     by_alias=True,
                     mode="json",
                 )
             )
+            await websocket.send_json(
+                self._voice_state_event(session_id, conversation_state).model_dump(
+                    by_alias=True,
+                    mode="json",
+                )
+            )
+            for message in self._conversation_messages.get(session_id, []):
+                await websocket.send_json(
+                    self._conversation_message_event(session_id, message).model_dump(
+                        by_alias=True,
+                        mode="json",
+                    )
+                )
+            for tool_call in self._tool_calls.get(session_id, []):
+                await websocket.send_json(
+                    self._tool_call_event(session_id, tool_call).model_dump(
+                        by_alias=True,
+                        mode="json",
+                    )
+                )
         except WebSocketDisconnect:
             await self.disconnect(session_id, websocket)
 
@@ -161,9 +200,16 @@ class SessionManager:
                         mode="json",
                     ),
                 )
+                return
+
+            if isinstance(command, ConversationRequestDemoCommand):
+                await self.run_demo_prompt(session_id, command.payload.prompt)
+                return
         except BoardCommandError as exc:
             log.info("board_command_rejected", session_id=session_id, code=exc.code)
-            await self.broadcast_error(session_id, code=exc.code, message=exc.message, recoverable=True)
+            await self.broadcast_error(
+                session_id, code=exc.code, message=exc.message, recoverable=True
+            )
 
     def get_board_state(self, session_id: str):
         """Return the current canonical board state for a session."""
@@ -240,6 +286,27 @@ class SessionManager:
         await self.broadcast(session_id, event)
         return event["payload"]
 
+    async def agent_undo_move(self, session_id: str) -> dict:
+        """Undo the latest move on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        move, board_state = state.undo_move()
+        payload = {
+            "protocolVersion": "1.0.0",
+            "direction": "event",
+            "type": "board.move_applied",
+            "messageId": self._message_id("undo"),
+            "sessionId": session_id,
+            "timestamp": self._timestamp(),
+            "payload": {
+                "origin": "agent-tool",
+                "move": move.model_dump(by_alias=True, mode="json"),
+                "board": board_state.model_dump(by_alias=True, mode="json"),
+            },
+        }
+        await self.broadcast(session_id, payload)
+        return payload["payload"]
+
     async def agent_set_highlights(
         self,
         session_id: str,
@@ -254,6 +321,20 @@ class SessionManager:
             sessionId=session_id,
             timestamp=self._timestamp(),
             payload=HighlightSetPayload(highlights=highlights),
+        ).model_dump(by_alias=True, mode="json")
+        await self.broadcast(session_id, event)
+        return event["payload"]
+
+    async def agent_clear_highlights(self, session_id: str) -> dict:
+        """Clear board highlights on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        state.clear_highlights()
+        event = HighlightSetEvent(
+            messageId=self._message_id("highlight"),
+            sessionId=session_id,
+            timestamp=self._timestamp(),
+            payload=HighlightSetPayload(highlights=[]),
         ).model_dump(by_alias=True, mode="json")
         await self.broadcast(session_id, event)
         return event["payload"]
@@ -284,6 +365,172 @@ class SessionManager:
         """Broadcast highlight updates from the agent/backend."""
 
         await self.agent_set_highlights(session_id, highlights)
+
+    async def set_conversation_state(self, session_id: str, state: ConversationState) -> None:
+        """Broadcast and persist conversation state."""
+
+        self._conversation_state[session_id] = state
+        event = self._voice_state_event(session_id, state).model_dump(by_alias=True, mode="json")
+        await self.broadcast(session_id, event)
+
+    async def add_conversation_message(
+        self, session_id: str, role: str, content: str
+    ) -> ConversationMessage:
+        """Persist and broadcast a conversation message."""
+
+        message = ConversationMessage(
+            id=self._message_id(role),
+            role=role,
+            content=content,
+            createdAt=self._timestamp(),
+        )
+        self._conversation_messages[session_id].append(message)
+        await self.broadcast(
+            session_id,
+            self._conversation_message_event(session_id, message).model_dump(
+                by_alias=True, mode="json"
+            ),
+        )
+        return message
+
+    async def trace_tool_call(
+        self,
+        session_id: str,
+        tool_name: str,
+        status: str,
+        summary: str,
+        arguments: dict | None = None,
+    ) -> ToolCallTrace:
+        """Persist and broadcast a tool call trace."""
+
+        tool_call = ToolCallTrace(
+            id=self._message_id("tool"),
+            toolName=tool_name,
+            status=status,
+            summary=summary,
+            arguments=arguments,
+            createdAt=self._timestamp(),
+        )
+        self._tool_calls[session_id].append(tool_call)
+        await self.broadcast(
+            session_id,
+            self._tool_call_event(session_id, tool_call).model_dump(by_alias=True, mode="json"),
+        )
+        return tool_call
+
+    async def run_demo_prompt(self, session_id: str, prompt: str) -> None:
+        """Simulate a deterministic voicebot turn for the demo and E2E tests."""
+
+        normalized_prompt = prompt.strip()
+        if not normalized_prompt:
+            raise BoardCommandError("empty_prompt", "A demo prompt is required.")
+
+        await self.set_conversation_state(session_id, "listening")
+        await self.add_conversation_message(session_id, "user", normalized_prompt)
+        await self.set_conversation_state(session_id, "thinking")
+
+        lower_prompt = normalized_prompt.lower()
+        assistant_reply = (
+            "I can inspect the position, make a move, reset the board, or manage highlights."
+        )
+
+        if "undo" in lower_prompt or "take back" in lower_prompt:
+            await self.trace_tool_call(
+                session_id, "undo_move", "started", "Undoing the latest move."
+            )
+            result = await self.agent_undo_move(session_id)
+            await self.trace_tool_call(
+                session_id, "undo_move", "completed", "Latest move reverted."
+            )
+            assistant_reply = f"I undid the last move. It is now {result['board']['turn']} to move."
+        elif "clear highlight" in lower_prompt:
+            await self.trace_tool_call(
+                session_id,
+                "clear_highlights",
+                "started",
+                "Clearing board highlights.",
+            )
+            await self.agent_clear_highlights(session_id)
+            await self.trace_tool_call(
+                session_id,
+                "clear_highlights",
+                "completed",
+                "Board highlights cleared.",
+            )
+            assistant_reply = "I cleared the current highlights from the board."
+        elif match := MOVE_PROMPT_PATTERN.search(lower_prompt):
+            from_square, to_square = match.groups()
+            arguments = {"from_square": from_square, "to_square": to_square}
+            await self.trace_tool_call(
+                session_id, "make_move", "started", "Applying a move.", arguments
+            )
+            result = await self.agent_apply_move(
+                session_id, from_square=from_square, to_square=to_square
+            )
+            await self.trace_tool_call(
+                session_id,
+                "make_move",
+                "completed",
+                f"Applied {result['move']['san']}.",
+                arguments,
+            )
+            assistant_reply = f"I played {result['move']['san']} and updated the live board."
+        elif "reset" in lower_prompt:
+            await self.trace_tool_call(session_id, "reset_board", "started", "Resetting the board.")
+            await self.agent_reset(session_id)
+            await self.trace_tool_call(
+                session_id, "reset_board", "completed", "Board reset to the initial position."
+            )
+            assistant_reply = "I reset the board to the starting position."
+        elif "highlight" in lower_prompt:
+            squares = SQUARE_PATTERN.findall(lower_prompt)
+            squares = [square.lower() for square in squares]
+            if not squares:
+                squares = ["e4"]
+            await self.trace_tool_call(
+                session_id,
+                "set_highlight",
+                "started",
+                "Highlighting target squares.",
+                {"squares": squares},
+            )
+            await self.agent_set_highlights(
+                session_id,
+                [
+                    BoardHighlight(
+                        id="demo-highlight", squares=squares, color="green", label="focus"
+                    )
+                ],
+            )
+            await self.trace_tool_call(
+                session_id,
+                "set_highlight",
+                "completed",
+                f"Highlighted {', '.join(squares)}.",
+                {"squares": squares},
+            )
+            assistant_reply = f"I highlighted {', '.join(squares)} on the board."
+        else:
+            await self.trace_tool_call(
+                session_id,
+                "get_board_state",
+                "started",
+                "Inspecting the current board state.",
+            )
+            snapshot = self.get_board_state(session_id)
+            await self.trace_tool_call(
+                session_id,
+                "get_board_state",
+                "completed",
+                f"Fetched the live board with {len(snapshot.move_history)} moves.",
+            )
+            assistant_reply = (
+                f"The position is ready. It is {snapshot.turn} to move and the board has "
+                f"{len(snapshot.move_history)} moves in its history."
+            )
+
+        await self.set_conversation_state(session_id, "speaking")
+        await self.add_conversation_message(session_id, "assistant", assistant_reply)
 
     async def broadcast(self, session_id: str, payload: dict) -> None:
         """Broadcast payload to all clients in a session."""
@@ -327,8 +574,37 @@ class SessionManager:
                     "pgnNavigation": True,
                     "boardAnnotations": True,
                     "boardHighlights": True,
+                    "conversationDemo": True,
                 }
             ),
+        )
+
+    def _voice_state_event(self, session_id: str, state: ConversationState) -> VoiceStateEvent:
+        return VoiceStateEvent(
+            messageId=self._message_id("voice-state"),
+            sessionId=session_id,
+            timestamp=self._timestamp(),
+            payload=VoiceStatePayload(state=state),
+        )
+
+    def _conversation_message_event(
+        self,
+        session_id: str,
+        message: ConversationMessage,
+    ) -> ConversationMessageEvent:
+        return ConversationMessageEvent(
+            messageId=self._message_id("conversation"),
+            sessionId=session_id,
+            timestamp=self._timestamp(),
+            payload=ConversationMessagePayload(message=message),
+        )
+
+    def _tool_call_event(self, session_id: str, tool_call: ToolCallTrace) -> ToolCallEvent:
+        return ToolCallEvent(
+            messageId=self._message_id("tool-call"),
+            sessionId=session_id,
+            timestamp=self._timestamp(),
+            payload=ToolCallPayload(toolCall=tool_call),
         )
 
     def _state_event(

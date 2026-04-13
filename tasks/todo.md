@@ -386,3 +386,21 @@ Para frontend agregar:
 - Verificacion base lista: tests unitarios, Playwright e2e, workflows CI y `prek.toml`.
 - Runtime Pipecat listo por codigo: orchestrator, providers y tools conectadas al estado canonico del tablero.
 - Documentacion base lista: setup, arquitectura e integracion.
+
+## Active Remediation Plan
+
+- [x] Agregar tools faltantes del agente: `undo_move`, `clear_highlights` y normalizar `set_highlight` vs `set_highlights`.
+- [x] Extender el protocolo con eventos de conversacion y transcript para la demo (`voice.state`, `conversation.message`, `tool.call`).
+- [x] Implementar estado conversacional canonico por sesion en backend para `listening`, `thinking` y `speaking`.
+- [x] Agregar un flujo demo/mock determinista para voz y transcript sin depender de STT/TTS reales en E2E.
+- [x] Rediseñar `examples/web` como voicebot: transcript visible, mensajes usuario/asistente, estado conversacional y audio remoto sin controles visibles.
+- [x] Actualizar Playwright para validar transcript, tool calls del agente y sincronizacion del tablero a partir del flujo mock.
+- [x] Revalidar con `pytest`, `vitest`, `tsc` y `playwright` antes de cerrar.
+
+## Remediation Review
+
+- Tools del agente completadas: `undo_move`, `clear_highlights`, `set_highlight` y `set_highlights` quedaron expuestas desde el orchestrator hacia el estado canonico del tablero.
+- Protocolo ampliado: la sesion ahora emite `voice.state`, `conversation.message` y `tool.call` para soportar transcript, estado conversacional y trazas del agente.
+- Demo rediseñada: `examples/web` ahora prioriza conversacion, transcript, tool activity y deja el audio remoto como infraestructura sin controles visibles.
+- Flujo mock para demo/E2E: se agrego `conversation.request_demo` para generar turnos deterministas con transcript, tool calls y cambios reales del tablero sin depender de proveedores externos.
+- Verificacion actualizada: `pytest`, `pnpm -r typecheck`, `vitest`, build del example web y `playwright` pasan con la implementacion nueva.

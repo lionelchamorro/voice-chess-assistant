@@ -8,6 +8,7 @@ from typing import Callable
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 import structlog
 
 from voice_chess_server.api.router import board, health, signaling
@@ -62,6 +63,13 @@ def create_app(
     app = FastAPI(
         title=resolved_settings.app_name,
         lifespan=lifespan_factory(resolved_settings, orchestrator_factory),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(resolved_settings.cors_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
     )
 
     @app.middleware("http")

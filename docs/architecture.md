@@ -14,7 +14,8 @@ The system is split into three layers:
 
 3. Frontend runtime
    `packages/voice-chess-react`
-   Owns board session state in React, emits user commands and renders a controlled board.
+   Owns board session state in React, negotiates browser voice transport, emits
+   user commands and renders a controlled board.
 
 ## Canonical state
 

@@ -5,6 +5,7 @@ Reusable React package for the voice chess assistant frontend.
 ## Current Scope
 
 - session provider for board WebSocket state
+- session provider for browser voice signaling and remote audio playback
 - hooks for connection state and board commands
 - controlled board UI with manual move requests
 - PGN navigation helpers through the provider API

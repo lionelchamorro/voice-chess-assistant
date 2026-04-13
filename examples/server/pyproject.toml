@@ -9,7 +9,7 @@ description = "Example server app for the voice chess assistant."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "voice-chess-server",
+    "voice-chess-server[voice]",
 ]
 
 [tool.hatch.build.targets.wheel]

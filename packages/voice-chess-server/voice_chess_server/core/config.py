@@ -37,6 +37,8 @@ class Settings(BaseSettings):
         "When the session starts, briefly introduce yourself and offer to analyze "
         "the current position or a PGN the user provides."
     )
+    auto_start_demo_on_voice_connect: bool = False
+    auto_start_demo_prompt: str | None = None
 
     openai_api_key: str | None = Field(default=None, repr=False)
     deepgram_api_key: str | None = Field(default=None, repr=False)
@@ -47,6 +49,10 @@ class Settings(BaseSettings):
     cartesia_model: str = "sonic-3"
 
     stun_urls: tuple[str, ...] = ("stun:stun.l.google.com:19302",)
+    cors_origins: tuple[str, ...] = (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    )
 
 
 @lru_cache(maxsize=1)

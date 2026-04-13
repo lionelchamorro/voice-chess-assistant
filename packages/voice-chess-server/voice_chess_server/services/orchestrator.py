@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -17,9 +18,30 @@ log = structlog.get_logger()
 class BotOrchestrator:
     """Run the voice pipeline for a negotiated transport."""
 
+    _AUTO_DEMO_MOVES: tuple[tuple[str, str], ...] = (
+        ("e2", "e4"),
+        ("e7", "e5"),
+        ("g1", "f3"),
+        ("b8", "c6"),
+        ("f1", "b5"),
+    )
+    _AUTO_DEMO_MOVE_DELAY_SECONDS = 0.9
+
     def __init__(self, settings: Settings, session_manager: SessionManager) -> None:
         self._settings = settings
         self._session_manager = session_manager
+
+    def get_runtime_status(self) -> tuple[bool, str | None]:
+        """Return whether the voice pipeline can start with current config."""
+
+        try:
+            runtime = self._load_runtime()
+            self._build_stt(runtime)
+            self._build_tts(runtime)
+            self._build_llm(runtime)
+        except SignalingRuntimeError as exc:
+            return False, str(exc)
+        return True, None
 
     async def run_transport(self, session_id: str, transport: Any) -> None:
         """Start a Pipecat pipeline for a transport."""
@@ -49,8 +71,11 @@ class BotOrchestrator:
         llm.register_function("load_position", self._tool_load_position(session_id))
         llm.register_function("load_pgn", self._tool_load_pgn(session_id))
         llm.register_function("make_move", self._tool_make_move(session_id))
+        llm.register_function("undo_move", self._tool_undo_move(session_id))
         llm.register_function("reset_board", self._tool_reset_board(session_id))
+        llm.register_function("set_highlight", self._tool_set_highlights(session_id))
         llm.register_function("set_highlights", self._tool_set_highlights(session_id))
+        llm.register_function("clear_highlights", self._tool_clear_highlights(session_id))
         llm.register_function("set_annotations", self._tool_set_annotations(session_id))
 
         tools = ToolsSchema(
@@ -100,6 +125,30 @@ class BotOrchestrator:
                     required=[],
                 ),
                 FunctionSchema(
+                    name="undo_move",
+                    description="Undo the latest live move on the board.",
+                    properties={},
+                    required=[],
+                ),
+                FunctionSchema(
+                    name="set_highlight",
+                    description="Highlight one or more squares on the board.",
+                    properties={
+                        "squares": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Squares to highlight.",
+                        },
+                        "color": {
+                            "type": "string",
+                            "enum": ["green", "yellow", "red", "blue"],
+                            "description": "Highlight color.",
+                        },
+                        "label": {"type": "string", "description": "Optional label."},
+                    },
+                    required=["squares", "color"],
+                ),
+                FunctionSchema(
                     name="set_highlights",
                     description="Highlight one or more squares on the board.",
                     properties={
@@ -118,6 +167,12 @@ class BotOrchestrator:
                     required=["squares", "color"],
                 ),
                 FunctionSchema(
+                    name="clear_highlights",
+                    description="Clear all highlights from the board.",
+                    properties={},
+                    required=[],
+                ),
+                FunctionSchema(
                     name="set_annotations",
                     description="Add board annotations such as comments, arrows or circles.",
                     properties={
@@ -132,15 +187,14 @@ class BotOrchestrator:
             ]
         )
 
-        context = LLMContext(
-            [{"role": "system", "content": self._settings.system_prompt}],
-            tools,
-        )
+        context = LLMContext(self._initial_messages(), tools)
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             user_params=LLMUserAggregatorParams(
                 user_turn_strategies=UserTurnStrategies(
-                    stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]
+                    stop=[
+                        TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())
+                    ]
                 ),
                 vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
             ),
@@ -165,15 +219,32 @@ class BotOrchestrator:
                 audio_out_sample_rate=24000,
             ),
         )
+        initial_turn_started = False
+
+        async def start_initial_turn(trigger: str) -> None:
+            nonlocal initial_turn_started
+            if initial_turn_started:
+                return
+            initial_turn_started = True
+            log.info("voice_initial_turn_started", session_id=session_id, trigger=trigger)
+            if self._settings.auto_start_demo_on_voice_connect:
+                await self._run_auto_demo_setup(session_id)
+                await self._session_manager.add_conversation_message(
+                    session_id,
+                    "assistant",
+                    "Starting a live opening demo. Interrupt me anytime and ask for another line.",
+                )
+            await task.queue_frames([LLMRunFrame()])
 
         @task.rtvi.event_handler("on_client_ready")
         async def on_client_ready(rtvi) -> None:
             log.info("voice_client_ready", session_id=session_id)
-            await task.queue_frames([LLMRunFrame()])
+            await start_initial_turn("rtvi_client_ready")
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client) -> None:
             log.info("voice_client_connected", session_id=session_id)
+            asyncio.create_task(start_initial_turn("transport_client_connected"))
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client) -> None:
@@ -182,6 +253,44 @@ class BotOrchestrator:
 
         runner = PipelineRunner(handle_sigint=False)
         await runner.run(task)
+
+    async def _run_auto_demo_setup(self, session_id: str) -> None:
+        await self._session_manager.trace_tool_call(
+            session_id,
+            "reset_board",
+            "started",
+            "Resetting the board for the automatic opening demo.",
+        )
+        await self._session_manager.agent_reset(session_id)
+        await self._session_manager.trace_tool_call(
+            session_id,
+            "reset_board",
+            "completed",
+            "Board reset for the automatic opening demo.",
+        )
+
+        for from_square, to_square in self._AUTO_DEMO_MOVES:
+            arguments = {"from_square": from_square, "to_square": to_square}
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "make_move",
+                "started",
+                f"Applying scripted demo move {from_square} to {to_square}.",
+                arguments,
+            )
+            result = await self._session_manager.agent_apply_move(
+                session_id,
+                from_square=from_square,
+                to_square=to_square,
+            )
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "make_move",
+                "completed",
+                f"Applied scripted demo move {result['move']['san']}.",
+                arguments,
+            )
+            await asyncio.sleep(self._AUTO_DEMO_MOVE_DELAY_SECONDS)
 
     def _build_stt(self, runtime: dict[str, Any]) -> Any:
         if self._settings.stt_provider != "deepgram":
@@ -228,24 +337,70 @@ class BotOrchestrator:
 
     def _tool_get_board_state(self, session_id: str):
         async def tool(params) -> None:
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "get_board_state",
+                "started",
+                "Inspecting the current board state.",
+            )
             snapshot = self._session_manager.get_board_state(session_id)
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "get_board_state",
+                "completed",
+                f"Fetched the live board with {len(snapshot.move_history)} moves.",
+            )
             await params.result_callback(snapshot.model_dump(by_alias=True, mode="json"))
 
         return tool
 
     def _tool_load_position(self, session_id: str):
         async def tool(params) -> None:
-            result = await self._session_manager.agent_load_fen(session_id, fen=params.arguments["fen"])
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "load_position",
+                "started",
+                "Loading a FEN position.",
+                {"fen": params.arguments["fen"]},
+            )
+            result = await self._session_manager.agent_load_fen(
+                session_id, fen=params.arguments["fen"]
+            )
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "load_position",
+                "completed",
+                "FEN position loaded.",
+                {"fen": params.arguments["fen"]},
+            )
             await params.result_callback(result)
 
         return tool
 
     def _tool_load_pgn(self, session_id: str):
         async def tool(params) -> None:
+            arguments = {
+                "pgn": params.arguments["pgn"],
+                "start_ply": params.arguments.get("start_ply"),
+            }
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "load_pgn",
+                "started",
+                "Loading a PGN line.",
+                arguments,
+            )
             result = await self._session_manager.agent_load_pgn(
                 session_id,
                 pgn=params.arguments["pgn"],
                 start_ply=params.arguments.get("start_ply"),
+            )
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "load_pgn",
+                "completed",
+                "PGN line loaded.",
+                arguments,
             )
             await params.result_callback(result)
 
@@ -253,11 +408,30 @@ class BotOrchestrator:
 
     def _tool_make_move(self, session_id: str):
         async def tool(params) -> None:
+            arguments = {
+                "from_square": params.arguments["from_square"],
+                "to_square": params.arguments["to_square"],
+                "promotion": params.arguments.get("promotion"),
+            }
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "make_move",
+                "started",
+                "Applying a move on the board.",
+                arguments,
+            )
             result = await self._session_manager.agent_apply_move(
                 session_id,
                 from_square=params.arguments["from_square"],
                 to_square=params.arguments["to_square"],
                 promotion=params.arguments.get("promotion"),
+            )
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "make_move",
+                "completed",
+                f"Applied {result['move']['san']}.",
+                arguments,
             )
             await params.result_callback(result)
 
@@ -265,7 +439,38 @@ class BotOrchestrator:
 
     def _tool_reset_board(self, session_id: str):
         async def tool(params) -> None:
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "reset_board",
+                "started",
+                "Resetting the board to the initial position.",
+            )
             result = await self._session_manager.agent_reset(session_id)
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "reset_board",
+                "completed",
+                "Board reset to the initial position.",
+            )
+            await params.result_callback(result)
+
+        return tool
+
+    def _tool_undo_move(self, session_id: str):
+        async def tool(params) -> None:
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "undo_move",
+                "started",
+                "Undoing the latest move.",
+            )
+            result = await self._session_manager.agent_undo_move(session_id)
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "undo_move",
+                "completed",
+                "Latest move reverted.",
+            )
             await params.result_callback(result)
 
         return tool
@@ -275,9 +480,24 @@ class BotOrchestrator:
             squares = params.arguments["squares"]
             color = params.arguments["color"]
             label = params.arguments.get("label")
+            arguments = {"squares": squares, "color": color, "label": label}
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "set_highlight",
+                "started",
+                f"Highlighting {', '.join(squares)}.",
+                arguments,
+            )
             result = await self._session_manager.agent_set_highlights(
                 session_id,
                 [BoardHighlight(id="agent-highlight", squares=squares, color=color, label=label)],
+            )
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "set_highlight",
+                "completed",
+                f"Highlighted {', '.join(squares)}.",
+                arguments,
             )
             await params.result_callback(result)
 
@@ -285,11 +505,65 @@ class BotOrchestrator:
 
     def _tool_set_annotations(self, session_id: str):
         async def tool(params) -> None:
-            annotations = [BoardAnnotation(**annotation) for annotation in params.arguments["annotations"]]
+            raw_annotations = params.arguments.get("annotations") if params.arguments else None
+            if not raw_annotations:
+                await self._session_manager.trace_tool_call(
+                    session_id,
+                    "set_annotations",
+                    "completed",
+                    "Skipped annotation update because no annotations were provided.",
+                    {"annotations": []},
+                )
+                await params.result_callback({"annotations": [], "skipped": True})
+                return
+
+            annotations = [BoardAnnotation(**annotation) for annotation in raw_annotations]
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "set_annotations",
+                "started",
+                "Adding board annotations.",
+                {"annotations": raw_annotations},
+            )
             result = await self._session_manager.agent_set_annotations(session_id, annotations)
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "set_annotations",
+                "completed",
+                "Board annotations updated.",
+                {"annotations": raw_annotations},
+            )
             await params.result_callback(result)
 
         return tool
+
+    def _tool_clear_highlights(self, session_id: str):
+        async def tool(params) -> None:
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "clear_highlights",
+                "started",
+                "Clearing all highlights.",
+            )
+            result = await self._session_manager.agent_clear_highlights(session_id)
+            await self._session_manager.trace_tool_call(
+                session_id,
+                "clear_highlights",
+                "completed",
+                "Board highlights cleared.",
+            )
+            await params.result_callback(result)
+
+        return tool
+
+    def _initial_messages(self) -> list[dict[str, str]]:
+        messages = [{"role": "system", "content": self._settings.system_prompt}]
+        if (
+            self._settings.auto_start_demo_on_voice_connect
+            and self._settings.auto_start_demo_prompt
+        ):
+            messages.append({"role": "user", "content": self._settings.auto_start_demo_prompt})
+        return messages
 
     def _load_runtime(self) -> dict[str, Any]:
         try:
