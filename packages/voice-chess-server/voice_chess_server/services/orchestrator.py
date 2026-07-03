@@ -212,14 +212,16 @@ class BotOrchestrator:
             situation = (
                 f"Está en modo repaso en la jugada {start_ply}."
                 if start_ply is not None
-                else "El tablero muestra la posición final; usa [[goto 0]] para ir al inicio."
+                else "El tablero muestra la posición final."
             )
             content = (
                 f"[Tablero] El alumno cargó una partida en PGN:\n{payload.get('pgn')}\n"
-                f"{situation} Repásala EN EL TABLERO, moviendo las piezas mientras hablas: "
-                "avanza cada movimiento con su marca [[next]] colocada en el momento exacto "
-                "en que lo comentas — una frase corta por movimiento, ambos bandos, en una "
-                "sola narración fluida. Nunca comentes una jugada sin su [[next]]: si la "
+                f"{situation} Repásala EN EL TABLERO, moviendo las piezas mientras hablas. "
+                "Tu PRIMERA marca es siempre [[goto 0]] para poner el tablero al inicio; "
+                "después avanza cada movimiento con su marca [[next]] colocada en el "
+                "momento exacto en que lo comentas — una frase corta por movimiento, ambos "
+                "bandos, en una sola narración fluida. Nunca uses [[reset]] con una partida "
+                "cargada (la borraría) y nunca comentes una jugada sin su [[next]]: si la "
                 "jugada no aparece en el tablero, el alumno no la ve. En los momentos "
                 "críticos usa analyze_position y muestra alternativas con [[var ...]] y "
                 "[[endvar]]."
@@ -238,13 +240,15 @@ class BotOrchestrator:
 
         return await self._push_context_message(session_id, prompt)
 
-    async def _push_context_message(self, session_id: str, content: str) -> bool:
+    async def _push_context_message(
+        self, session_id: str, content: str, run_llm: bool = True
+    ) -> bool:
         active = self._active_sessions.get(session_id)
         if active is None:
             return False
         frame = active.llm_messages_append_frame_cls(
             messages=[{"role": "user", "content": content}],
-            run_llm=True,
+            run_llm=run_llm,
         )
         try:
             await active.task.queue_frames([frame])
@@ -276,7 +280,21 @@ class BotOrchestrator:
                 )
                 summary = f"Sideline continues with {result['move']['san']}."
             elif action.verb == "next":
-                await self._session_manager.agent_review_step(session_id, 1)
+                try:
+                    await self._session_manager.agent_review_step(session_id, 1)
+                except BoardCommandError as exc:
+                    # The classic miss: the game was loaded live (final
+                    # position) and the coach forgot [[goto 0]]. Its narration
+                    # expects the first move, so recover by reviewing ply 1.
+                    snapshot = self._session_manager.get_board_state(session_id)
+                    if (
+                        exc.code == "invalid_ply"
+                        and snapshot.view_mode == "live"
+                        and snapshot.move_history
+                    ):
+                        await self._session_manager.agent_go_to_ply(session_id, 1)
+                    else:
+                        raise
                 summary = "Advanced the reviewed game by one move."
             elif action.verb == "prev":
                 await self._session_manager.agent_review_step(session_id, -1)
@@ -318,6 +336,14 @@ class BotOrchestrator:
             log.info("narrated_action_rejected", session_id=session_id, spec=spec, code=exc.code)
             await self._session_manager.trace_tool_call(
                 session_id, trace_name, "completed", f"Rejected: {exc.message}", {"spec": spec}
+            )
+            # Markers have no result_callback: without this note the model
+            # keeps narrating while the board silently stays behind.
+            await self._push_context_message(
+                session_id,
+                f"[Tablero] Tu marca [[{spec}]] falló ({exc.message}). El tablero NO "
+                "cambió: corrige el rumbo en tu próxima intervención.",
+                run_llm=False,
             )
             return
         except Exception:

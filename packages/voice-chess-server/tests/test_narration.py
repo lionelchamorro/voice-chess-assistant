@@ -296,3 +296,64 @@ def test_parse_action_spec_drops_embedded_say_variants() -> None:
         assert action is not None
         assert all("say" not in arg for arg in action.args), raw
         assert "la" not in action.args, raw
+
+
+async def test_next_from_live_end_recovers_by_reviewing_ply_one() -> None:
+    """Regression: game loaded live (final position), coach fires [[next]]
+    without [[goto 0]] first — observed as five invalid_ply rejections with a
+    static board. It must recover by showing the first move."""
+
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+
+    await session_manager.agent_load_pgn("s1", pgn="1. e4 c5 2. Nf3 d6")  # live, at the end
+
+    await orchestrator.execute_narrated_action("s1", "next")
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.view_mode == "review"
+    assert snapshot.review_ply == 1
+    assert snapshot.last_move is not None
+    assert snapshot.last_move.san == "e4"
+
+    # Subsequent [[next]] markers now walk the game normally.
+    await orchestrator.execute_narrated_action("s1", "next")
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.review_ply == 2
+    assert snapshot.last_move is not None
+    assert snapshot.last_move.san == "c5"
+
+
+async def test_failed_marker_pushes_feedback_to_the_model() -> None:
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+
+    class _AppendFrame:
+        def __init__(self, messages: list, run_llm: bool) -> None:
+            self.messages = messages
+            self.run_llm = run_llm
+
+    class _Task:
+        def __init__(self) -> None:
+            self.queued: list = []
+
+        async def queue_frames(self, frames: list) -> None:
+            self.queued.extend(frames)
+
+    from voice_chess_server.services.orchestrator import _ActiveSession
+
+    fake_task = _Task()
+    orchestrator._active_sessions["s1"] = _ActiveSession(
+        task=fake_task,
+        llm_messages_append_frame_cls=_AppendFrame,
+    )
+
+    # Illegal narrated move on the starting position.
+    await orchestrator.execute_narrated_action("s1", "move e2e5")
+
+    assert len(fake_task.queued) == 1
+    feedback = fake_task.queued[0]
+    assert feedback.run_llm is False  # never restart the turn mid-narration
+    assert "move e2e5" in feedback.messages[0]["content"]
+    assert "NO" in feedback.messages[0]["content"]
