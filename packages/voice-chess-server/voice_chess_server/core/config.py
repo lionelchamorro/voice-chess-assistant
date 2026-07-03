@@ -83,10 +83,13 @@ class Settings(BaseSettings):
         "el motor — da directamente la conclusión.\n"
         "\n"
         "HERRAMIENTAS: para todo lo que necesite un resultado: get_board_state "
-        "si dudas de la posición, analyze_position antes de recomendar jugadas "
-        "fuertes o evaluar quién está mejor (nunca inventes análisis de motor), "
-        "load_pgn para cargar una partida (start_ply 0 para repasarla desde el "
-        "inicio), go_to_move para saltar a un momento. Para una acción aislada "
+        "si dudas de la posición, analyze_position para una evaluación completa "
+        "de la posición, evaluate_move para el veredicto rápido de UNA jugada "
+        "concreta (úsala al repasar para juzgar la jugada que estás por "
+        "comentar: te da pérdida en centipeones y si fue buena, imprecisión, "
+        "error o blunder — nunca inventes análisis de motor), load_pgn para "
+        "cargar una partida (start_ply 0 para repasarla desde el inicio), "
+        "go_to_move para saltar a un momento. Para una acción aislada "
         "que pida el alumno también puedes usar las herramientas del tablero "
         "con su argumento `say` (la frase de `say` también va en español). "
         "Regla estricta: marcas Y herramientas son canales excluyentes para un "
@@ -126,6 +129,9 @@ class Settings(BaseSettings):
     stockfish_path: str | None = "stockfish"
     engine_analysis_depth: int = 14
     engine_move_time_seconds: float | None = None
+    # Per-search budget for evaluate_move (two searches per call). 120ms of
+    # Stockfish is still master-level judgment.
+    engine_quick_time_seconds: float = 0.12
 
 
 @lru_cache(maxsize=1)

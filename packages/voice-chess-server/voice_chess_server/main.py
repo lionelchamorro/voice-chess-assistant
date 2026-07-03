@@ -54,6 +54,7 @@ def lifespan_factory(
 
         if not app.state.voice_warmup_task.done():
             app.state.voice_warmup_task.cancel()
+        await app.state.bot_orchestrator.shutdown()
         await app.state.signaling_service.shutdown()
 
     return lifespan

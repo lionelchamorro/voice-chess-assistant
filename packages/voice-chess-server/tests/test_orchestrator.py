@@ -675,3 +675,63 @@ async def test_kickoff_falls_back_to_plain_intro_without_demo() -> None:
 
     assert handled is False
     assert fake_task.queued == []
+
+
+def test_classify_centipawn_loss_thresholds() -> None:
+    from voice_chess_server.services.orchestrator import classify_centipawn_loss
+
+    assert classify_centipawn_loss(None) == "desconocida"
+    assert classify_centipawn_loss(0) == "excelente"
+    assert classify_centipawn_loss(20) == "excelente"
+    assert classify_centipawn_loss(50) == "buena"
+    assert classify_centipawn_loss(100) == "imprecisión"
+    assert classify_centipawn_loss(250) == "error"
+    assert classify_centipawn_loss(251) == "blunder"
+
+
+@pytest.mark.skipif(shutil.which("stockfish") is None, reason="stockfish binary not installed")
+async def test_evaluate_move_uses_a_persistent_engine() -> None:
+    settings = Settings(
+        deepgram_api_key="x",
+        openai_api_key="x",
+        elevenlabs_api_key="x",
+        engine_quick_time_seconds=0.05,
+    )
+    orchestrator = BotOrchestrator(settings=settings, session_manager=SessionManager())
+
+    board = chess.Board()
+    first = await orchestrator._evaluate_move_with_engine(board, board.parse_san("e4"))
+    engine_after_first = orchestrator._engine
+    assert engine_after_first is not None
+    assert first["verdict"] in {"excelente", "buena"}
+    assert first["centipawnLoss"] is not None
+
+    second = await orchestrator._evaluate_move_with_engine(board, board.parse_san("Nf3"))
+    assert orchestrator._engine is engine_after_first, "engine must be reused, not respawned"
+    assert second["move"] == "Nf3"
+
+    await orchestrator.shutdown()
+    assert orchestrator._engine is None
+
+
+@pytest.mark.skipif(shutil.which("stockfish") is None, reason="stockfish binary not installed")
+async def test_evaluate_move_tool_rejects_illegal_moves() -> None:
+    settings = Settings(
+        deepgram_api_key="x",
+        openai_api_key="x",
+        elevenlabs_api_key="x",
+        engine_quick_time_seconds=0.05,
+    )
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+
+    tool = orchestrator._tool_evaluate_move("s1")
+    params = _FakeToolParams({"san": "Ke5"})
+    await tool(params)
+    assert params.results[0]["error"]["code"] == "illegal_move"
+
+    good = _FakeToolParams({"san": "e4"})
+    await tool(good)
+    assert good.results[0]["verdict"] in {"excelente", "buena"}
+
+    await orchestrator.shutdown()

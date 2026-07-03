@@ -51,6 +51,23 @@ PACED_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
+
+def classify_centipawn_loss(centipawn_loss: int | None) -> str:
+    """Map centipawn loss to the verdict vocabulary a coach would use."""
+
+    if centipawn_loss is None:
+        return "desconocida"
+    if centipawn_loss <= 20:
+        return "excelente"
+    if centipawn_loss <= 50:
+        return "buena"
+    if centipawn_loss <= 100:
+        return "imprecisión"
+    if centipawn_loss <= 250:
+        return "error"
+    return "blunder"
+
+
 _SAY_PROPERTY: dict[str, str] = {
     "type": "string",
     "description": (
@@ -145,6 +162,8 @@ class BotOrchestrator:
         self._session_manager = session_manager
         self._active_sessions: dict[str, _ActiveSession] = {}
         self._speech_pacers: dict[str, SpeechPacer] = {}
+        self._engine: Any = None
+        self._engine_lock = asyncio.Lock()
         session_manager.set_manual_move_hook(self.notify_manual_move)
         session_manager.set_board_event_hook(self.notify_board_event)
         session_manager.set_text_prompt_hook(self.deliver_text_prompt)
@@ -434,6 +453,7 @@ class BotOrchestrator:
         llm.register_function("clear_highlights", self._tool_clear_highlights(session_id))
         llm.register_function("set_annotations", self._tool_set_annotations(session_id))
         llm.register_function("analyze_position", self._tool_analyze_position(session_id))
+        llm.register_function("evaluate_move", self._tool_evaluate_move(session_id))
         llm.register_function("show_next_move", self._tool_show_next_move(session_id))
         llm.register_function("show_previous_move", self._tool_show_previous_move(session_id))
         llm.register_function("go_to_move", self._tool_go_to_move(session_id))
@@ -563,6 +583,27 @@ class BotOrchestrator:
                         "analysis yourself."
                     ),
                     properties={},
+                    required=[],
+                ),
+                FunctionSchema(
+                    name="evaluate_move",
+                    description=(
+                        "Fast engine verdict (~a quarter second) for ONE concrete move in "
+                        "the position currently on the board: evaluation, best "
+                        "alternative, centipawn loss and a verdict (excelente/buena/"
+                        "imprecisión/error/blunder). Use it while reviewing a game to "
+                        "judge the move you are about to comment, or when the student "
+                        "asks about a specific move. For a full position assessment use "
+                        "analyze_position instead."
+                    ),
+                    properties={
+                        "san": {
+                            "type": "string",
+                            "description": "The move to judge, in SAN like Nf3 (or UCI like g1f3).",
+                        },
+                        "from_square": {"type": "string", "description": "From square like e2."},
+                        "to_square": {"type": "string", "description": "To square like e4."},
+                    },
                     required=[],
                 ),
                 FunctionSchema(
@@ -1294,13 +1335,63 @@ class BotOrchestrator:
             ),
         )
 
-    async def _analyze_with_engine(self, board: chess.Board) -> dict[str, Any]:
+    def _tool_evaluate_move(self, session_id: str):
+        async def action(arguments: dict[str, Any]) -> dict[str, Any]:
+            snapshot = self._session_manager.get_board_state(session_id)
+            board = chess.Board(snapshot.fen)
+            move_input = arguments.get("san") or (
+                (arguments.get("from_square") or "") + (arguments.get("to_square") or "")
+            )
+            if not move_input:
+                raise BoardCommandError("missing_move", "Provide the move as SAN or squares.")
+            move_args = move_arguments(move_input)
+            try:
+                if move_args["san"]:
+                    move = board.parse_san(move_args["san"])
+                else:
+                    move = chess.Move.from_uci(
+                        f"{move_args['from_square']}{move_args['to_square']}"
+                    )
+            except ValueError as exc:
+                raise BoardCommandError(
+                    "illegal_move", f"'{move_input}' is not a legal move in this position."
+                ) from exc
+            if move not in board.legal_moves:
+                raise BoardCommandError(
+                    "illegal_move", f"'{move_input}' is not a legal move in this position."
+                )
+            return await self._evaluate_move_with_engine(board, move)
+
+        return self._tool_handler(
+            session_id,
+            "evaluate_move",
+            started_summary="Quick engine check on a move.",
+            action=action,
+            completed_summary=lambda _args, result: (
+                f"{result['move']}: {result['verdict']}"
+                + (
+                    f" (pierde {result['centipawnLoss']} centipeones; mejor era {result['bestMoveSan']})"
+                    if result.get("centipawnLoss") and result.get("bestMoveSan")
+                    else ""
+                )
+            ),
+        )
+
+    async def _get_engine(self) -> Any:
+        """Return the persistent UCI engine, starting it on first use.
+
+        Spawning Stockfish per call cost 100ms+ before a single node was
+        searched; one long-lived process (guarded by `_engine_lock`) makes
+        quick evaluations actually quick.
+        """
+
         path = self._settings.stockfish_path
         if not path:
             raise BoardCommandError(
                 "engine_unavailable", "No chess engine is configured on this server."
             )
-
+        if self._engine is not None:
+            return self._engine
         try:
             _transport, engine = await chess.engine.popen_uci(path)
         except (FileNotFoundError, OSError) as exc:
@@ -1308,16 +1399,39 @@ class BotOrchestrator:
                 "engine_unavailable",
                 f"Chess engine binary '{path}' is not available on this server.",
             ) from exc
+        self._engine = engine
+        return engine
 
-        try:
-            limit = (
-                chess.engine.Limit(time=self._settings.engine_move_time_seconds)
-                if self._settings.engine_move_time_seconds
-                else chess.engine.Limit(depth=self._settings.engine_analysis_depth)
-            )
-            info = await engine.analyse(board, limit)
-        finally:
-            await engine.quit()
+    async def _engine_analyse(self, board: chess.Board, limit: Any) -> Any:
+        """Analyse under the engine lock, restarting a dead engine once."""
+
+        async with self._engine_lock:
+            engine = await self._get_engine()
+            try:
+                return await engine.analyse(board, limit)
+            except chess.engine.EngineError:
+                log.warning("engine_restarting_after_error")
+                self._engine = None
+                engine = await self._get_engine()
+                return await engine.analyse(board, limit)
+
+    async def shutdown(self) -> None:
+        """Release runtime resources (the persistent engine)."""
+
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            try:
+                await engine.quit()
+            except Exception:
+                log.exception("engine_shutdown_failed")
+
+    async def _analyze_with_engine(self, board: chess.Board) -> dict[str, Any]:
+        limit = (
+            chess.engine.Limit(time=self._settings.engine_move_time_seconds)
+            if self._settings.engine_move_time_seconds
+            else chess.engine.Limit(depth=self._settings.engine_analysis_depth)
+        )
+        info = await self._engine_analyse(board, limit)
 
         pv = info.get("pv") or []
         best_move = pv[0] if pv else None
@@ -1329,6 +1443,44 @@ class BotOrchestrator:
             "evaluation": self._format_engine_score(score, board.turn) if score else "unknown",
             "depth": info.get("depth"),
             "principalVariationSan": self._principal_variation_san(board, pv),
+        }
+
+    async def _evaluate_move_with_engine(
+        self, board: chess.Board, move: chess.Move
+    ) -> dict[str, Any]:
+        """Fast verdict for one concrete move: centipawn loss vs the best move."""
+
+        quick = chess.engine.Limit(time=self._settings.engine_quick_time_seconds)
+        mover = board.turn
+
+        best_info = await self._engine_analyse(board, quick)
+        best_pv = best_info.get("pv") or []
+        best_move = best_pv[0] if best_pv else None
+        best_score = best_info.get("score")
+
+        after = board.copy()
+        after.push(move)
+        played_info = await self._engine_analyse(after, quick)
+        played_score = played_info.get("score")
+
+        centipawn_loss: int | None = None
+        if best_score is not None and played_score is not None:
+            best_cp = best_score.pov(mover).score(mate_score=100_000)
+            played_cp = played_score.pov(mover).score(mate_score=100_000)
+            if best_cp is not None and played_cp is not None:
+                centipawn_loss = max(0, best_cp - played_cp)
+
+        return {
+            "move": board.san(move),
+            "evaluationAfter": (
+                self._format_engine_score(played_score, mover) if played_score else "unknown"
+            ),
+            "bestMoveSan": board.san(best_move) if best_move else None,
+            "bestEvaluation": (
+                self._format_engine_score(best_score, mover) if best_score else "unknown"
+            ),
+            "centipawnLoss": centipawn_loss,
+            "verdict": classify_centipawn_loss(centipawn_loss),
         }
 
     @staticmethod
