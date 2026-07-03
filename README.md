@@ -136,7 +136,7 @@ All settings are env vars prefixed `VOICE_CHESS_` (see
 
 ## Workspace layout
 
-- `examples/web` — "Second", the example web app (Vite + React)
+- `examples/web` — the example web app (Vite + React)
 - `examples/server` — runnable backend wrapper
 - `packages/voice-chess-react` — reusable React library (provider, hooks, board)
 - `packages/voice-chess-core` — shared protocol package (types, JSON schemas, fixtures)

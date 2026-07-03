@@ -75,8 +75,8 @@ function Studio({
           <span className="brand-mark" aria-hidden="true">
             ♞
           </span>
-          <span className="brand-name">Second</span>
-          <span className="brand-tag">voice chess coach</span>
+          <span className="brand-name">Voice Chess</span>
+          <span className="brand-tag">coach</span>
         </div>
         <div className="topbar-actions">
           <span className="session-chip">
@@ -118,8 +118,8 @@ function Studio({
       <main className="workspace">
         <aside className="rail">
           <section className="intro">
-            <p className="eyebrow">Every grandmaster has one</p>
-            <h1>Second</h1>
+            <p className="eyebrow">Your AI chess teacher</p>
+            <h1>Voice Chess Coach</h1>
             <p className="lede">
               A coach that talks — and moves the pieces on the board while it explains.
             </p>
@@ -295,14 +295,14 @@ function Transcript({
               data-role={message.role}
               data-testid="conversation-message"
             >
-              <span className="say-role">{message.role === "assistant" ? "second" : message.role}</span>
+              <span className="say-role">{message.role === "assistant" ? "coach" : message.role}</span>
               <p>{message.content}</p>
             </article>
           ))
         )}
         {conversationState === "thinking" ? (
           <article className="say say-pending" data-role="assistant" aria-hidden="true">
-            <span className="say-role">second</span>
+            <span className="say-role">coach</span>
             <p className="thinking-dots">
               <span />
               <span />

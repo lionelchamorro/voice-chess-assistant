@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("example app shows transcript and tool-driven board updates", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Second" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Voice Chess Coach" })).toBeVisible();
   await page.getByRole("button", { name: "Connect session", exact: true }).click();
   await page.getByRole("button", { name: "Reset", exact: true }).click();
 
