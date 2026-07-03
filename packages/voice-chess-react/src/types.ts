@@ -32,6 +32,12 @@ export interface VoiceChessProviderProps {
   signalingApiUrl?: string;
   sessionId: string;
   autoConnect?: boolean;
+  /**
+   * ICE servers for the voice WebRTC peer connection. Defaults to a public
+   * Google STUN server, matching the backend's default `stun_urls` setting.
+   * Provide TURN servers here for clients behind symmetric NATs.
+   */
+  iceServers?: RTCIceServer[];
   children: ReactNode;
 }
 

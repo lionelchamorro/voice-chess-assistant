@@ -2,9 +2,18 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import type { MicrophonePermissionStatus, VoiceConnectionStatus } from "../types";
 
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const ICE_GATHERING_TIMEOUT_MS = 4000;
+// With non-trickle signaling, waiting for the "complete" gathering state can
+// stall for seconds while STUN queries settle (especially on localhost, where
+// host candidates arrive instantly and are enough). Send the offer a short
+// grace period after the first candidate instead.
+const ICE_FIRST_CANDIDATE_GRACE_MS = 500;
+
 interface UseVoiceTransportOptions {
   sessionId: string;
   signalingApiUrl: string | null;
+  iceServers?: RTCIceServer[] | undefined;
   onError: (message: string | null) => void;
 }
 
@@ -23,6 +32,7 @@ interface VoiceStatusResponse {
 export function useVoiceTransport({
   sessionId,
   signalingApiUrl,
+  iceServers = DEFAULT_ICE_SERVERS,
   onError,
 }: UseVoiceTransportOptions) {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
@@ -85,7 +95,7 @@ export function useVoiceTransport({
       remoteStreamRef.current = remoteStream;
       setRemoteAudioStream(remoteStream);
 
-      const peerConnection = new RTCPeerConnection();
+      const peerConnection = new RTCPeerConnection({ iceServers });
       peerConnectionRef.current = peerConnection;
 
       for (const track of localStream.getAudioTracks()) {
@@ -129,7 +139,7 @@ export function useVoiceTransport({
       setVoiceConnectionStatus("connecting");
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
-      await waitForIceGatheringComplete(peerConnection);
+      await waitForIceGatheringComplete(peerConnection, ICE_GATHERING_TIMEOUT_MS);
       if (!peerConnection.localDescription?.sdp || !peerConnection.localDescription.type) {
         throw new Error("WebRTC offer negotiation did not produce a local description.");
       }
@@ -228,20 +238,42 @@ function stopStream(stream: MediaStream | null) {
   }
 }
 
-function waitForIceGatheringComplete(peerConnection: RTCPeerConnection) {
+function waitForIceGatheringComplete(peerConnection: RTCPeerConnection, timeoutMs: number) {
   if (peerConnection.iceGatheringState === "complete") {
     return Promise.resolve();
   }
 
   return new Promise<void>((resolve) => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    let graceId: ReturnType<typeof setTimeout> | null = null;
+
+    const finish = () => {
+      peerConnection.removeEventListener("icegatheringstatechange", handleStateChange);
+      peerConnection.removeEventListener("icecandidate", handleCandidate);
+      clearTimeout(timeoutId);
+      if (graceId !== null) {
+        clearTimeout(graceId);
+      }
+      resolve();
+    };
+
     const handleStateChange = () => {
       if (peerConnection.iceGatheringState === "complete") {
-        peerConnection.removeEventListener("icegatheringstatechange", handleStateChange);
-        resolve();
+        finish();
+      }
+    };
+
+    const handleCandidate = (event: RTCPeerConnectionIceEvent) => {
+      if (event.candidate && graceId === null) {
+        graceId = setTimeout(finish, ICE_FIRST_CANDIDATE_GRACE_MS);
       }
     };
 
     peerConnection.addEventListener("icegatheringstatechange", handleStateChange);
+    peerConnection.addEventListener("icecandidate", handleCandidate);
+    // Trickle-less signaling still works with a partial candidate set, so a
+    // stalled gatherer (e.g. no STUN/TURN reachable) must not block forever.
+    timeoutId = setTimeout(finish, timeoutMs);
   });
 }
 

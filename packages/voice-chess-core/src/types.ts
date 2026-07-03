@@ -80,6 +80,8 @@ export interface BoardState {
   legalMoves: LegalMovesMap;
   moveHistory: MoveDescriptor[];
   lastMove?: MoveDescriptor | null;
+  /** SAN moves of the hypothetical sideline currently shown on top of the reviewed position. */
+  variation?: string[];
   annotations: BoardAnnotation[];
   highlights: BoardHighlight[];
   isCheck: boolean;

@@ -397,6 +397,164 @@ Para frontend agregar:
 - [x] Actualizar Playwright para validar transcript, tool calls del agente y sincronizacion del tablero a partir del flujo mock.
 - [x] Revalidar con `pytest`, `vitest`, `tsc` y `playwright` antes de cerrar.
 
+## V2 Rearchitecture Plan (2026-07-02, pendiente de aprobacion)
+
+Diagnostico: el camino de voz real (Pipecat) nunca alimenta la UI (transcript y
+`voice.state` solo los emite el simulador regex `run_demo_prompt`), no existe
+sincronizacion voz-tablero, el WebRTC del front es artesanal y sin `iceServers`,
+y los tool handlers no manejan errores. El producto "profesor que mueve piezas"
+requiere re-cablear el runtime, no parches.
+
+### Fase 1 — Adoptar RTVI end-to-end
+
+- [x] Back: `TranscriptProcessor` + `BoardBridgeObserver` (BaseObserver local
+      a `run_transport`) en el pipeline real; emiten `conversation.message`
+      y `voice.state` genuinos (listening/thinking/speaking) por el board
+      socket, ya no solo el simulador. Ver `orchestrator.py::run_transport`.
+- [ ] Front: reemplazar `useVoiceTransport` artesanal por
+      `@pipecat-ai/client-js` + `@pipecat-ai/small-webrtc-transport` — no
+      hecho en esta pasada (cambio grande, requiere nueva dependencia npm;
+      se optó por arreglar el WebRTC artesanal en su lugar: `iceServers` +
+      timeout de ICE gathering).
+- [ ] Mover el simulador regex de `SessionManager.run_demo_prompt` a
+      `voice-chess-testkit` — no hecho, deferido (sigue siendo el único
+      camino determinista para e2e sin credenciales reales).
+- [x] Registro de pipelines por sesion (`BotOrchestrator._active_sessions`):
+      una oferta nueva para el mismo `session_id` cancela la anterior;
+      cleanup en `finally` con chequeo de identidad para evitar razas.
+      Excepciones del pipeline ahora se loguean (antes las tragaba
+      `BackgroundTasks` en silencio).
+
+### Fase 2 — El profesor de verdad
+
+- [x] Tool `analyze_position` con Stockfish real via `chess.engine` (async,
+      degrada con error claro si el binario no está disponible). Probado
+      contra Stockfish 18 real, incluye detección de mate forzado.
+- [x] Modelo docente: default subido a gpt-4o (Settings, README, .env.example)
+      — gpt-4o-mini abandonaba secuencias largas de tool calls (solo jugaba
+      la primera movida del demo y narraba el resto sin ejecutar).
+- [x] Repaso de partidas + variantes (2026-07-02, tercera pasada): tools
+      `show_next_move`/`show_previous_move`/`go_to_move`/`return_to_live`
+      para recorrer una partida cargada ply a ply (mueve ambos bandos,
+      paced con la voz), y sandbox de variantes `play_variation_move`/
+      `end_variation` sobre la posición revisada sin tocar la partida
+      (BoardSessionState.variation_moves; campo `variation` en BoardState +
+      chip "sideline" en la UI). `make_move` acepta SAN además de
+      coordenadas, promociona a dama por defecto, y `lastMove` ahora refleja
+      la jugada visible durante el review (arregla tinte/animación del
+      tablero al navegar). Prompts reescritos: prohibido narrar mecánica
+      ("ahora muevo la pieza"), disciplina de continuación con ejemplo
+      literal del ritmo frase→jugada.
+- [x] Sincronia voz-tablero implementada (2026-07-02, segunda pasada):
+      `SpeechPacer` en `orchestrator.py` — las tools que mutan el tablero
+      (make_move, undo, reset, load_fen/pgn, highlights, annotations)
+      esperan a que el audio del turno actual empiece a sonar
+      (`BotStartedSpeakingFrame` + lead de 0.6s) antes de aplicar el cambio.
+      Si el turno no tiene texto hablado, no se demora nada; timeout de 2s
+      como red de seguridad. Config: `speech_pacing_*` en Settings.
+      Ademas se eliminó el demo scripteado (`_run_auto_demo_setup`): ahora
+      el propio LLM enseña la apertura via prompt "una frase corta → una
+      jugada", así el tablero sigue a la voz también en el demo. El system
+      prompt fuerza el patrón anuncio-antes-de-tool.
+- [x] Jugadas manuales del usuario inyectadas al contexto del LLM en vivo
+      via `SessionManager.set_manual_move_hook` → `BotOrchestrator
+      .notify_manual_move` → `LLMMessagesAppendFrame` en la pipeline activa.
+
+### Fase 3 — Robustez y produccion
+
+- [x] try/except en todos los tool handlers (`BotOrchestrator._tool_handler`):
+      `BoardCommandError` → error tipado al LLM, argumentos inválidos →
+      `invalid_arguments`, cualquier otra excepción → `internal_error`
+      logueado. El turno del asistente ya no se cuelga.
+- [x] `broadcast` tolerante a sockets muertos (captura `RuntimeError` además
+      de `WebSocketDisconnect`).
+- [x] `iceServers` configurable en el cliente (prop `iceServers` en
+      `VoiceChessProvider`, default STUN de Google) + timeout de ICE
+      gathering (4s) para no colgar `connecting` para siempre.
+- [ ] Auth (token efímero por sesión) — no implementado, sigue abierto.
+- [ ] Lifecycle: TTL de sesiones / limpieza de mensajes y tool calls — no
+      implementado, sigue creciendo sin límite en memoria.
+- [x] Investigado compartir `LocalSmartTurnAnalyzerV3`: **descartado**, es
+      stateful por conexión (`_audio_buffer`, `_speech_triggered`);
+      compartirlo mezclaría audio entre sesiones concurrentes. El costo de
+      cargar el modelo ONNX por conexión es inherente a esta clase de
+      Pipecat tal como está, no hay seam para inyectar una sesión
+      compartida sin fork de la librería.
+- [x] Reconexión con backoff exponencial (500ms→8s) en `useBoardSocket`,
+      solo cuando la desconexión no fue manual (`disconnect()` no reintenta).
+- [x] E2E arreglado de raíz: `App.tsx` nunca renderizaba `conversationMessages`
+      pese a que el provider ya los exponía (bug real, no solo el test).
+      Se agregó el panel de transcript (`data-testid="conversation-messages"`)
+      y ahora el spec de Playwright pasa contra el flujo real, no solo se
+      hizo pasar el test.
+- [ ] Dockerfile + métricas Pipecat + límites de gasto por sesión — no
+      implementado, sigue abierto.
+
+**Hallazgos adicionales durante la verificación (no en el plan original):**
+
+- `OpenAILLMService(model=...)` estaba usando un parámetro deprecado de
+  Pipecat 0.0.108; corregido a `settings=OpenAILLMService.Settings(model=...)`.
+- `pyright --strict` y `ruff check` **ya estaban rotos en `main`** antes de
+  esta sesión (370 errores de pyright, 20+ de ruff N806 solo en
+  `orchestrator.py`, más S101 pendiente en toda la suite de tests). No es
+  una regresión introducida acá — de hecho el conteo de pyright bajó a 277
+  al consolidar los tool handlers. Se dejó documentado en vez de intentar
+  un lint-cleanup completo y no relacionado al pedido.
+- En este entorno sandboxeado de desarrollo, el primer handshake WebSocket
+  de Chromium hacia `localhost` se colgaba indefinidamente (HTTP normal
+  funcionaba bien) hasta un primer "warm-up" del sandbox de macOS; no es un
+  bug de la app — se verificó con un cliente WebSocket Python crudo contra
+  el mismo backend, que conectó al instante. No requirió cambios de código.
+
+## Speech-sync v2 (2026-07-02, cuarta pasada)
+
+Regresión reportada con gpt-4o: emitía todas las tool calls en paralelo y sin
+texto previo (una completion solo-tools), así que el pacer no tenía voz con
+qué sincronizar y el tablero se jugaba entero antes del audio.
+
+- [x] `parallel_tool_calls: False` en el request de OpenAI (via
+      `Settings.extra`) — una tool call por completion, imposible batchear
+      las 5 jugadas en un respiro.
+- [x] Argumento `say` en todas las tools que mutan el tablero: la narración
+      viaja DENTRO del tool call; el server la habla via `TTSSpeakFrame` y
+      retiene la jugada hasta que ese audio empieza (`SpeechPacer
+      .await_speaking`). Sync garantizado estructuralmente, sin depender de
+      que el modelo escriba texto antes del tool call. Si el modelo sí
+      narró en el stream, `say` se ignora para no duplicar voz.
+- [x] `enable_rtvi=False` en `PipelineTask`: el cliente browser no abre data
+      channel, así que el RTVIProcessor solo llenaba la cola de mensajes del
+      transporte ("Message queue is full (50 messages)" cada pocos ms).
+- [x] Prompts reescritos alrededor de `say` (system + demo con ejemplo
+      literal `make_move(san='e4', say='White opens with e4...')`).
+
+## Narrated Action Stream (2026-07-03, quinta pasada)
+
+Implementado el Tier 1 de docs/speech-action-sync.md: sincronización a nivel
+de palabra entre voz y tablero via marcas inline.
+
+- [x] `services/narration.py`: `StreamMarkerParser` (parseo incremental de
+      `[[...]]` seguro ante marcas partidas entre chunks del stream, holdback
+      de prefijos, drop de marcas sin cerrar en flush), `ChoreographyState`
+      (cues anclados a offset de texto limpio, disparo cuando el contador de
+      playout cruza el anchor, secuencias generación/playout independientes
+      para que cues de una completion futura no disparen contra el audio de
+      la anterior, drain en BotStoppedSpeaking, clear en interrupción).
+- [x] Orchestrator: `_NarrationMarkerProcessor` (entre llm y tts — quita
+      marcas antes de que el TTS las vea) y `_ActionSchedulerProcessor`
+      (después de transport.output(), donde los TTSTextFrame llegan word-
+      alineados por el clock de pts del transport). `execute_narrated_action`
+      despacha move/next/prev/reset/var/endvar/highlight/clear al
+      SessionManager con trace en el Engine room y tolerancia a marcas
+      ilegales/desconocidas.
+- [x] Prompts: system prompt enseña el DSL de marcas como via principal de
+      demostración (tools quedan para lo que necesita resultado); demo
+      prompt = una sola narración continua con marcas.
+- [x] Setting `narrated_actions_enabled` (default true) para bypassear los
+      procesadores.
+- [x] 15 tests nuevos (51 total) + simulación end-to-end generación→playout
+      →tablero + build del pipeline real con los procesadores verificado
+      contra pipecat 0.0.108.
+
 ## Remediation Review
 
 - Tools del agente completadas: `undo_move`, `clear_highlights`, `set_highlight` y `set_highlights` quedaron expuestas desde el orchestrator hacia el estado canonico del tablero.

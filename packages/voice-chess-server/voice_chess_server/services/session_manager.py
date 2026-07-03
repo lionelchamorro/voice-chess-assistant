@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
-from datetime import UTC, datetime
 import re
+from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
+import structlog
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
-import structlog
 
 from voice_chess_server.schemas.protocol import (
     AnnotationSetEvent,
     AnnotationSetPayload,
     BoardAnnotation,
-    BoardNavigateCommand,
     BoardHighlight,
+    BoardNavigateCommand,
     BoardRequestLoadFenCommand,
     BoardRequestLoadPgnCommand,
     BoardRequestMoveCommand,
@@ -32,6 +33,7 @@ from voice_chess_server.schemas.protocol import (
     EventOrigin,
     HighlightSetEvent,
     HighlightSetPayload,
+    MoveDescriptor,
     SessionErrorEvent,
     SessionErrorPayload,
     SessionReadyEvent,
@@ -39,9 +41,9 @@ from voice_chess_server.schemas.protocol import (
     ToolCallEvent,
     ToolCallPayload,
     ToolCallTrace,
+    VoiceChessClientCommand,
     VoiceStateEvent,
     VoiceStatePayload,
-    VoiceChessClientCommand,
 )
 from voice_chess_server.services.board_state import BoardCommandError, BoardSessionState
 
@@ -50,6 +52,10 @@ log = structlog.get_logger()
 COMMAND_ADAPTER = TypeAdapter(VoiceChessClientCommand)
 MOVE_PROMPT_PATTERN = re.compile(r"\b([a-h][1-8])\s*(?:to|-)\s*([a-h][1-8])\b", re.IGNORECASE)
 SQUARE_PATTERN = re.compile(r"[a-h][1-8]", re.IGNORECASE)
+
+ManualMoveHook = Callable[[str, MoveDescriptor], Awaitable[None]]
+BoardEventHook = Callable[[str, str, dict], Awaitable[None]]
+TextPromptHook = Callable[[str, str], Awaitable[bool]]
 
 
 class SessionManager:
@@ -62,6 +68,46 @@ class SessionManager:
         self._conversation_messages: dict[str, list[ConversationMessage]] = defaultdict(list)
         self._tool_calls: dict[str, list[ToolCallTrace]] = defaultdict(list)
         self._lock = asyncio.Lock()
+        self._manual_move_hook: ManualMoveHook | None = None
+        self._board_event_hook: BoardEventHook | None = None
+        self._text_prompt_hook: TextPromptHook | None = None
+
+    def set_manual_move_hook(self, hook: ManualMoveHook | None) -> None:
+        """Register a callback invoked when the user moves a piece by hand.
+
+        Lets the running voice pipeline learn about manual moves it did not
+        make itself, so the assistant can react to them mid-conversation.
+        """
+
+        self._manual_move_hook = hook
+
+    def set_board_event_hook(self, hook: BoardEventHook | None) -> None:
+        """Register a callback for user board actions beyond single moves.
+
+        Fired when the user loads a FEN/PGN or resets the board from the UI,
+        so the running voice pipeline learns about position changes it did
+        not make itself.
+        """
+
+        self._board_event_hook = hook
+
+    def set_text_prompt_hook(self, hook: TextPromptHook | None) -> None:
+        """Register a callback that routes typed prompts to the live coach.
+
+        The hook returns True when an active voice pipeline consumed the
+        prompt; otherwise the deterministic demo simulator handles it (used
+        by e2e tests and credential-less sessions).
+        """
+
+        self._text_prompt_hook = hook
+
+    async def _fire_board_event(self, session_id: str, kind: str, payload: dict) -> None:
+        if self._board_event_hook is None:
+            return
+        try:
+            await self._board_event_hook(session_id, kind, payload)
+        except Exception:  # noqa: BLE001 - a hook failure must not break the board flow
+            log.exception("board_event_hook_failed", session_id=session_id, kind=kind)
 
     async def connect(self, session_id: str, websocket: WebSocket) -> None:
         """Accept and initialize a WebSocket client."""
@@ -150,6 +196,11 @@ class SessionManager:
                         },
                     },
                 )
+                if command.payload.source == "user" and self._manual_move_hook is not None:
+                    try:
+                        await self._manual_move_hook(session_id, descriptor)
+                    except Exception:
+                        log.exception("manual_move_hook_failed", session_id=session_id)
                 return
 
             if isinstance(command, BoardNavigateCommand):
@@ -175,6 +226,7 @@ class SessionManager:
                     payload={"origin": "user-command", "board": board_state},
                 )
                 await self.broadcast(session_id, event.model_dump(by_alias=True, mode="json"))
+                await self._fire_board_event(session_id, "reset", {})
                 return
 
             if isinstance(command, BoardRequestLoadFenCommand):
@@ -186,6 +238,7 @@ class SessionManager:
                         mode="json",
                     ),
                 )
+                await self._fire_board_event(session_id, "load_fen", {"fen": command.payload.fen})
                 return
 
             if isinstance(command, BoardRequestLoadPgnCommand):
@@ -200,9 +253,26 @@ class SessionManager:
                         mode="json",
                     ),
                 )
+                await self._fire_board_event(
+                    session_id,
+                    "load_pgn",
+                    {"pgn": command.payload.pgn, "start_ply": command.payload.start_ply},
+                )
                 return
 
             if isinstance(command, ConversationRequestDemoCommand):
+                prompt = command.payload.prompt.strip()
+                if prompt and self._text_prompt_hook is not None:
+                    try:
+                        delivered = await self._text_prompt_hook(session_id, prompt)
+                    except Exception:  # noqa: BLE001 - fall back to the simulator
+                        log.exception("text_prompt_hook_failed", session_id=session_id)
+                        delivered = False
+                    if delivered:
+                        # The live coach took the prompt; reflect it in the
+                        # transcript (typed text never crosses the STT path).
+                        await self.add_conversation_message(session_id, "user", prompt)
+                        return
                 await self.run_demo_prompt(session_id, command.payload.prompt)
                 return
         except BoardCommandError as exc:
@@ -220,9 +290,10 @@ class SessionManager:
     async def agent_apply_move(
         self,
         session_id: str,
-        from_square: str,
-        to_square: str,
+        from_square: str | None = None,
+        to_square: str | None = None,
         promotion: str | None = None,
+        san: str | None = None,
     ) -> dict:
         """Apply a move on behalf of the agent and broadcast the result."""
 
@@ -231,7 +302,78 @@ class SessionManager:
             from_square=from_square,
             to_square=to_square,
             promotion=promotion,
+            san=san,
         )
+        return await self._broadcast_move_applied(session_id, descriptor, board_state)
+
+    async def agent_review_step(self, session_id: str, offset: int) -> dict:
+        """Step the reviewed game by `offset` plies on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        board_state = state.step_review(offset)
+        event = self._state_event(session_id, board_state, origin="agent-tool").model_dump(
+            by_alias=True,
+            mode="json",
+        )
+        await self.broadcast(session_id, event)
+        return event["payload"]
+
+    async def agent_go_to_ply(self, session_id: str, ply: int) -> dict:
+        """Jump the review to a specific ply on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        board_state = state.navigate("review", ply)
+        event = self._state_event(session_id, board_state, origin="agent-tool").model_dump(
+            by_alias=True,
+            mode="json",
+        )
+        await self.broadcast(session_id, event)
+        return event["payload"]
+
+    async def agent_go_live(self, session_id: str) -> dict:
+        """Return the board to the live position on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        board_state = state.navigate("live", None)
+        event = self._state_event(session_id, board_state, origin="agent-tool").model_dump(
+            by_alias=True,
+            mode="json",
+        )
+        await self.broadcast(session_id, event)
+        return event["payload"]
+
+    async def agent_play_variation_move(
+        self,
+        session_id: str,
+        from_square: str | None = None,
+        to_square: str | None = None,
+        promotion: str | None = None,
+        san: str | None = None,
+    ) -> dict:
+        """Play a hypothetical sideline move on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        descriptor, board_state = state.play_variation_move(
+            from_square=from_square,
+            to_square=to_square,
+            promotion=promotion,
+            san=san,
+        )
+        return await self._broadcast_move_applied(session_id, descriptor, board_state)
+
+    async def agent_end_variation(self, session_id: str) -> dict:
+        """Drop the current sideline on behalf of the agent."""
+
+        state = self._sessions.setdefault(session_id, BoardSessionState(session_id=session_id))
+        board_state = state.end_variation()
+        event = self._state_event(session_id, board_state, origin="agent-tool").model_dump(
+            by_alias=True,
+            mode="json",
+        )
+        await self.broadcast(session_id, event)
+        return event["payload"]
+
+    async def _broadcast_move_applied(self, session_id: str, descriptor, board_state) -> dict:
         payload = {
             "protocolVersion": "1.0.0",
             "direction": "event",
@@ -540,7 +682,12 @@ class SessionManager:
         for client in clients:
             try:
                 await client.send_json(payload)
-            except WebSocketDisconnect:
+            except (WebSocketDisconnect, RuntimeError) as exc:
+                log.info(
+                    "board_broadcast_dropped_stale_client",
+                    session_id=session_id,
+                    reason=str(exc),
+                )
                 stale_clients.append(client)
 
         for client in stale_clients:

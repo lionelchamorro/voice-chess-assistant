@@ -41,6 +41,7 @@ export function VoiceChessProvider({
   signalingApiUrl,
   sessionId,
   autoConnect = true,
+  iceServers,
   children,
 }: VoiceChessProviderProps) {
   const [boardState, setBoardState] = useState<BoardState | null>(null);
@@ -86,6 +87,7 @@ export function VoiceChessProvider({
   } = useVoiceTransport({
     signalingApiUrl: signalingApiUrl ?? null,
     sessionId,
+    iceServers,
     onError: setVoiceErrorMessage,
   });
 

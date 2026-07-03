@@ -204,6 +204,7 @@ class BoardState(BaseModel):
     legal_moves: dict[str, list[str]] = Field(alias="legalMoves")
     move_history: list[MoveDescriptor] = Field(alias="moveHistory")
     last_move: MoveDescriptor | None = Field(default=None, alias="lastMove")
+    variation: list[str] = Field(default_factory=list)
     annotations: list[BoardAnnotation]
     highlights: list[BoardHighlight]
     is_check: bool = Field(alias="isCheck")

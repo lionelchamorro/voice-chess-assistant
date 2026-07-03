@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from typing import Callable
@@ -30,7 +31,7 @@ def lifespan_factory(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        configure_logging(settings.log_level)
+        configure_logging(settings.log_level, settings.log_file)
 
         app.state.settings = settings
         app.state.session_manager = SessionManager()
@@ -45,9 +46,14 @@ def lifespan_factory(
         app.state.signaling_service = SmallWebRTCSignalingService(
             ice_servers=tuple(IceServerConfig(urls=url) for url in settings.stun_urls)
         )
+        # Warm the per-connection audio models in the background so the first
+        # "Join voice" doesn't pay the cold-load cost.
+        app.state.voice_warmup_task = asyncio.create_task(app.state.bot_orchestrator.warmup())
 
         yield
 
+        if not app.state.voice_warmup_task.done():
+            app.state.voice_warmup_task.cancel()
         await app.state.signaling_service.shutdown()
 
     return lifespan
@@ -89,4 +95,6 @@ def run() -> None:
     """Run a local development server."""
 
     settings = get_settings()
-    uvicorn.run("voice_chess_server.main:create_app", factory=True, host=settings.host, port=settings.port)
+    uvicorn.run(
+        "voice_chess_server.main:create_app", factory=True, host=settings.host, port=settings.port
+    )
