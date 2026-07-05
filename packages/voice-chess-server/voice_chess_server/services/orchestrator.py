@@ -19,6 +19,7 @@ from voice_chess_server.services.narration import (
     ChoreographyState,
     StreamMarkerParser,
     move_arguments,
+    normalize_san,
     parse_action_spec,
     strip_markers,
 )
@@ -233,17 +234,20 @@ class BotOrchestrator:
                 if start_ply is not None
                 else "El tablero muestra la posición final."
             )
+            total_plies = len(self._session_manager.get_board_state(session_id).move_history)
             content = (
-                f"[Tablero] El alumno cargó una partida en PGN:\n{payload.get('pgn')}\n"
+                f"[Tablero] El alumno cargó una partida en PGN ({total_plies} medias "
+                f"jugadas):\n{payload.get('pgn')}\n"
                 f"{situation} Repásala EN EL TABLERO, moviendo las piezas mientras hablas. "
                 "Tu PRIMERA marca es siempre [[goto 0]] para poner el tablero al inicio; "
-                "después avanza cada movimiento con su marca [[next]] colocada en el "
-                "momento exacto en que lo comentas — una frase corta por movimiento, ambos "
-                "bandos, en una sola narración fluida. Nunca uses [[reset]] con una partida "
-                "cargada (la borraría) y nunca comentes una jugada sin su [[next]]: si la "
-                "jugada no aparece en el tablero, el alumno no la ve. En los momentos "
-                "críticos usa analyze_position y muestra alternativas con [[var ...]] y "
-                "[[endvar]]."
+                "después avanza cada movimiento con [[next <san>]] incluyendo la jugada "
+                "exacta (ej. [[next Bd7]]) en el momento en que la comentas — una frase "
+                "corta por movimiento, ambos bandos, EN ORDEN y sin saltarte ninguna: el "
+                "tablero verifica cada jugada contra la partida y rechaza las que no "
+                "corresponden. Cada 8-10 jugadas haz una pausa breve e invita preguntas "
+                "antes de seguir. Nunca uses [[reset]] con una partida cargada (la "
+                "borraría). Usa evaluate_move en las jugadas dudosas y muestra "
+                "alternativas con [[var ...]] y [[endvar]]."
             )
         elif kind == "reset":
             content = (
@@ -299,22 +303,7 @@ class BotOrchestrator:
                 )
                 summary = f"Sideline continues with {result['move']['san']}."
             elif action.verb == "next":
-                try:
-                    await self._session_manager.agent_review_step(session_id, 1)
-                except BoardCommandError as exc:
-                    # The classic miss: the game was loaded live (final
-                    # position) and the coach forgot [[goto 0]]. Its narration
-                    # expects the first move, so recover by reviewing ply 1.
-                    snapshot = self._session_manager.get_board_state(session_id)
-                    if (
-                        exc.code == "invalid_ply"
-                        and snapshot.view_mode == "live"
-                        and snapshot.move_history
-                    ):
-                        await self._session_manager.agent_go_to_ply(session_id, 1)
-                    else:
-                        raise
-                summary = "Advanced the reviewed game by one move."
+                summary = await self._narrated_next(session_id, action.args)
             elif action.verb == "prev":
                 await self._session_manager.agent_review_step(session_id, -1)
                 summary = "Stepped the reviewed game one move back."
@@ -372,6 +361,89 @@ class BotOrchestrator:
         await self._session_manager.trace_tool_call(
             session_id, trace_name, "completed", summary, {"spec": spec}
         )
+
+    # How far ahead a [[next <san>]] mismatch may fast-forward to resync the
+    # board with the narration.
+    _RESYNC_LOOKAHEAD_PLIES = 8
+
+    async def _narrated_next(self, session_id: str, args: list[str]) -> str:
+        """Advance the reviewed game, verified against the narrated move.
+
+        [[next]] is open-loop: the board advances exactly one ply while the
+        model narrates from memory and drifts (skipped or hallucinated moves
+        desynchronize board and speech for the rest of the review). With
+        [[next <san>]] the server closes the loop: it verifies the narrated
+        move against the game, fast-forwards a few plies to resync when the
+        model skipped some, refuses to move on hallucinated ones, and feeds
+        the position back into the context so the model can re-anchor.
+        """
+
+        snapshot = self._session_manager.get_board_state(session_id)
+        history = snapshot.move_history
+        if not history:
+            raise BoardCommandError("no_moves", "There are no recorded moves to review.")
+        total = len(history)
+        at_live_end = snapshot.view_mode != "review"
+        current_ply = snapshot.review_ply if not at_live_end else total
+        expected = normalize_san(" ".join(args)) if args else None
+
+        if expected is None:
+            # Legacy bare [[next]]: step blindly; recover the forgotten
+            # [[goto 0]] case (live at the end) by reviewing ply 1.
+            if at_live_end:
+                await self._session_manager.agent_go_to_ply(session_id, 1)
+            else:
+                await self._session_manager.agent_review_step(session_id, 1)
+            return "Advanced the reviewed game by one move."
+
+        search_start = 0 if at_live_end else (current_ply or 0)
+        window = history[search_start : search_start + self._RESYNC_LOOKAHEAD_PLIES]
+        match_index = next(
+            (
+                search_start + offset
+                for offset, move in enumerate(window)
+                if normalize_san(move.san) == expected or move.uci == expected.lower()
+            ),
+            None,
+        )
+
+        if match_index is None:
+            real_next = history[search_start].san if search_start < total else None
+            raise BoardCommandError(
+                "narration_desync",
+                f"'{expected}' no es una de las próximas jugadas de la partida. "
+                + (
+                    f"La siguiente jugada real es {real_next} "
+                    f"(jugada {search_start + 1} de {total})."
+                    if real_next
+                    else "La partida ya terminó de repasarse."
+                ),
+            )
+
+        target_ply = match_index + 1
+        skipped = match_index - search_start
+        await self._session_manager.agent_go_to_ply(session_id, target_ply)
+        if skipped:
+            await self._push_context_message(
+                session_id,
+                f"[Tablero] Te salteaste {skipped} jugada(s); salté a la jugada "
+                f"{target_ply} de {total} ({history[match_index].san}) para seguir tu "
+                "narración. Retoma desde ahí sin omitir jugadas.",
+                run_llm=False,
+            )
+            log.info(
+                "narrated_review_resynced",
+                session_id=session_id,
+                skipped=skipped,
+                target_ply=target_ply,
+            )
+        else:
+            await self._push_context_message(
+                session_id,
+                f"[Tablero] Jugada {target_ply}/{total}: {history[match_index].san}.",
+                run_llm=False,
+            )
+        return f"Showed move {target_ply}/{total}: {history[match_index].san}."
 
     async def _speak(self, session_id: str, text: str) -> bool:
         """Queue server-driven narration into the running pipeline's TTS."""

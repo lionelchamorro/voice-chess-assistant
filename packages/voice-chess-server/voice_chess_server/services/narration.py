@@ -63,6 +63,12 @@ def strip_markers(text: str) -> str:
     return _MARKER_PATTERN.sub("", text)
 
 
+def normalize_san(san: str) -> str:
+    """Normalize a SAN string for comparison (checks, mate, annotations)."""
+
+    return san.strip().rstrip("+#!?").replace("0-0-0", "O-O-O").replace("0-0", "O-O")
+
+
 PROMOTION_NAME_BY_LETTER = {
     "q": "queen",
     "r": "rook",

@@ -649,7 +649,7 @@ async def test_kickoff_prefers_loaded_pgn_and_instructs_board_review() -> None:
 
     assert handled is True
     content = fake_task.queued[0].messages[0]["content"]
-    assert "[[next]]" in content
+    assert "[[next <san>]]" in content
     assert "1. e4 c5" in content
 
 

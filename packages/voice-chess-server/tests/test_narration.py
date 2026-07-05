@@ -357,3 +357,113 @@ async def test_failed_marker_pushes_feedback_to_the_model() -> None:
     assert feedback.run_llm is False  # never restart the turn mid-narration
     assert "move e2e5" in feedback.messages[0]["content"]
     assert "NO" in feedback.messages[0]["content"]
+
+
+def _fake_pipeline(orchestrator: BotOrchestrator):
+    from voice_chess_server.services.orchestrator import _ActiveSession
+
+    class _AppendFrame:
+        def __init__(self, messages: list, run_llm: bool) -> None:
+            self.messages = messages
+            self.run_llm = run_llm
+
+    class _Task:
+        def __init__(self) -> None:
+            self.queued: list = []
+
+        async def queue_frames(self, frames: list) -> None:
+            self.queued.extend(frames)
+
+    task = _Task()
+    orchestrator._active_sessions["s1"] = _ActiveSession(
+        task=task, llm_messages_append_frame_cls=_AppendFrame
+    )
+    return task
+
+
+async def test_verified_next_advances_when_narration_matches() -> None:
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+    _fake_pipeline(orchestrator)
+
+    await session_manager.agent_load_pgn("s1", pgn="1. e4 c5 2. f4 Nc6", start_ply=0)
+
+    await orchestrator.execute_narrated_action("s1", "next e4")
+    await orchestrator.execute_narrated_action("s1", "next c5")
+
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.review_ply == 2
+    assert snapshot.last_move is not None
+    assert snapshot.last_move.san == "c5"
+
+
+async def test_verified_next_resyncs_when_the_coach_skips_moves() -> None:
+    """Regression for the observed run: the coach skipped Bd7 and O-O and
+    narrated Bxc6 while the board was plies behind. The board must jump to
+    the narrated move instead of silently desynchronizing."""
+
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+    task = _fake_pipeline(orchestrator)
+
+    await session_manager.agent_load_pgn(
+        "s1", pgn="1. e4 c5 2. f4 Nc6 3. Nf3 d6 4. Bb5 Bd7 5. O-O a6 6. Bxc6 Bxc6", start_ply=7
+    )
+
+    # Board is after Bb5 (ply 7); the coach skips Bd7/O-O/a6 and says Bxc6.
+    await orchestrator.execute_narrated_action("s1", "next Bxc6")
+
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.review_ply == 11
+    assert snapshot.last_move is not None
+    assert snapshot.last_move.san == "Bxc6"
+    # And the model was told it skipped moves.
+    feedback = [f.messages[0]["content"] for f in task.queued]
+    assert any("salteaste" in text for text in feedback)
+
+
+async def test_verified_next_refuses_hallucinated_moves() -> None:
+    """Regression: 'Peón e seis' was narrated but e6 never happens in the
+    game — the board must not move and the model must learn the real move."""
+
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+    task = _fake_pipeline(orchestrator)
+
+    await session_manager.agent_load_pgn("s1", pgn="1. e4 c5 2. f4 Nc6", start_ply=1)
+
+    await orchestrator.execute_narrated_action("s1", "next e6")
+
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.review_ply == 1  # board did not move
+    feedback = [f.messages[0]["content"] for f in task.queued]
+    assert any("c5" in text and "falló" in text for text in feedback)
+
+
+async def test_verified_next_from_live_end_finds_the_first_move() -> None:
+    settings = Settings(deepgram_api_key="x", openai_api_key="x", elevenlabs_api_key="x")
+    session_manager = SessionManager()
+    orchestrator = BotOrchestrator(settings=settings, session_manager=session_manager)
+    _fake_pipeline(orchestrator)
+
+    await session_manager.agent_load_pgn("s1", pgn="1. e4 c5 2. f4 Nc6")  # live at end
+
+    await orchestrator.execute_narrated_action("s1", "next e4")
+
+    snapshot = session_manager.get_board_state("s1")
+    assert snapshot.view_mode == "review"
+    assert snapshot.review_ply == 1
+    assert snapshot.last_move is not None
+    assert snapshot.last_move.san == "e4"
+
+
+def test_normalize_san_handles_checks_and_castling() -> None:
+    from voice_chess_server.services.narration import normalize_san
+
+    assert normalize_san("Qxb1+") == "Qxb1"
+    assert normalize_san("Bxg2#") == "Bxg2"
+    assert normalize_san("0-0") == "O-O"
+    assert normalize_san(" Nf3! ") == "Nf3"
